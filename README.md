@@ -325,23 +325,6 @@ ruff check .
 
 CI runs both on Python 3.10, 3.11, 3.12 and 3.13.
 
-## Extending
-
-- **New gesture:** subclass `gestures.Detector`, implement `update(record, buffer)`, and pass it via `GestureClassifier(extra_detectors=[...])`. The buffer gives you the last 45 frames of normalised landmarks and the wrist trajectory.
-- **Editing keys:** edit `EDIT_SWIPES` in `config.py`.
-- **Letters:** retrain with more data, including your own recordings. Dwell, lockout, smoothing and confidence settings are in `AslConfig`.
-- **Tuning:** every threshold is a named field in `config.py` (finger-extension ratio, swipe speed and distance, latch time, sequence windows, and so on).
-
-## Roadmap
-
-- [ ] Per-user calibration wizard (records your own pose templates and swipe speed)
-- [x] Live telemetry HUD (skeleton, state, pose, gesture)
-- [x] Static ASL fingerspelling (Random Forest, dwell-based commit)
-- [x] Record-your-own-hand tool for per-user ASL training data
-- [ ] Motion-based J and Z (trajectory detector on top of the letter handshape)
-- [ ] Word prediction / auto-complete to cut the strokes needed per word
-- [ ] Learned temporal classifier (1D-CNN / GRU over the landmark buffer) as a drop-in `Detector`
-
 ## License
 
 [MIT](LICENSE). Free to use, adapt and build on, especially for accessibility work.
