@@ -3,7 +3,7 @@ Three-tier power/interaction state machine.
 
     ┌────────────┐  open palm held 2 s   ┌────────────┐
     │    IDLE    │ ────────────────────▶ │   ACTIVE   │
-    │   5 FPS    │ ◀──────────────────── │   30 FPS   │
+    │   10 FPS   │ ◀──────────────────── │   30 FPS   │
     └────────────┘   no hand for 2 s     └────────────┘
           ▲                                     │
           │ "On, On, On"                        │ "Off, Off, Off"

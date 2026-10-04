@@ -57,7 +57,7 @@ def test_wake_type_and_standby_cycle():
     try:
         d = Driver(app)
         assert app.sm.state == SystemState.IDLE
-        d.run("OPEN_PALM", 2.4)                         # wake gesture @ 5 FPS
+        d.run("OPEN_PALM", 2.4)                         # wake gesture @ 10 FPS
         assert app.sm.state == SystemState.ACTIVE and app.keyboard.enabled
 
         d.run("POINT", 1.0)                             # past grace period

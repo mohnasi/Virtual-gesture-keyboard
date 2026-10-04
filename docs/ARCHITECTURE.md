@@ -69,7 +69,7 @@ DEEP STANDBY must *guarantee* no keystrokes. Three independent barriers enforce 
 | State | Camera reads/s | NN inferences/s (static scene) | NN inferences/s (motion) |
 |---|---|---|---|
 | ACTIVE | 30 | 30 | 30 |
-| IDLE | 5 | 0 (after 3 s latch) | ≤ 5 |
+| IDLE | 10 | 0 (after 3 s latch) | ≤ 10 |
 | DEEP STANDBY | 1 | 0 (after 3 s latch) | ≤ 1 |
 
 With `ENABLE_HUD = True`, each processed frame adds one 640×360 → 480×270 resize, a few vector draws and an `imshow`. The snapshot hand-off is skipped while the HUD is hidden. With `ENABLE_HUD = False` the HUD module is never imported.

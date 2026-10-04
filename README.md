@@ -36,7 +36,7 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
 ```
                         ┌──────────────────────────── CaptureWorker thread ───┐
    Webcam ──► cv2.VideoCapture (DSHOW) ──► lock 640×360 ──► mirror ──► LatestFrameSlot
-              rate = 30 / 5 / 1 FPS (follows the state machine)     (1-slot mailbox,
+              rate = 30 / 10 / 1 FPS (follows the state machine)    (1-slot mailbox,
                         └───────────────────────────────────────── overwrite-on-write)
                                                                          │
  ┌────────────────────────────── InferenceWorker thread ────────────────▼───────────┐
@@ -64,7 +64,7 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
  │  │                                                                            │  │
  │  │   ┌──────────┐  open palm held 2 s   ┌──────────┐                          │  │
  │  │   │   IDLE   │ ────────────────────► │  ACTIVE  │──► KeyMapper ──┐         │  │
- │  │   │  5 FPS   │ ◄──────────────────── │  30 FPS  │                │         │  │
+ │  │   │  10 FPS  │ ◄──────────────────── │  30 FPS  │                │         │  │
  │  │   │  yellow  │    no hand for 2 s    │  green   │                │         │  │
  │  │   └──────────┘                       └────┬─────┘                │         │  │
  │  │        ▲                                  │ "Off, Off, Off"      │         │  │
@@ -90,7 +90,7 @@ Each thread is the only owner of the resources it touches: the camera, the Media
 | State | Tray | Capture rate | Motion gate | MediaPipe | Typing | Leaves when… |
 |---|---|---|---|---|---|---|
 | **ACTIVE** | 🟢 Green | 30 FPS | Off (full inference) | Every frame | ✅ Enabled | No hand for 2 s → IDLE · "Off ×3" → DEEP STANDBY |
-| **IDLE** | 🟡 Yellow | 5 FPS | On | Only after motion (+3 s latch) | ❌ | Open palm held steady 2 s → ACTIVE |
+| **IDLE** | 🟡 Yellow | 10 FPS | On | Only after motion (+3 s latch) | ❌ | Open palm held steady 2 s → ACTIVE |
 | **DEEP STANDBY** | 🔴 Red | 1 FPS | On | Only after motion (+3 s latch) | ⛔ Hard-disabled | "On ×3" → IDLE |
 
 Entering or leaving DEEP STANDBY shows a native desktop notification. The tray menu also has **Activate now**, **Pause typing (Deep Standby)**, **Resume** and **Quit**, for carers or for moments when gestures aren't practical.

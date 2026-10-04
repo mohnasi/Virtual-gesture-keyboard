@@ -216,3 +216,28 @@ def test_configure_switches_sequence_window(cfg):
     assert rep.window_s == 9.0
     clf.configure(SystemState.ACTIVE, 30.0)
     assert rep.window_s == 1.0
+
+
+def test_idle_fps_is_10_and_tolerates_misclassified_frames(cfg):
+    """Regression for the wake 'glitch': at 5 FPS a 2 s hold had ~10 samples, so
+    a couple of misread frames pushed the open-palm share below 85 % before the
+    motion-gate latch (3 s) expired. 10 FPS halves the sampling noise."""
+    assert cfg.power.fps[SystemState.IDLE] == 10.0
+
+    def success_rate(fps, p=0.08, trials=80):
+        rng = np.random.default_rng(42)
+        ok = 0
+        for _ in range(trials):
+            clf = GestureClassifier(cfg.gesture, cfg.pose)
+            clf.configure(SystemState.IDLE, fps)
+            t = 0.0
+            for _ in range(int(cfg.motion.latch_s * fps)):
+                t += 1.0 / fps
+                pose = "FIST" if rng.random() < p else "OPEN_PALM"
+                if any(e.kind == GestureKind.HOLD for e in clf.update(observation(pose, t))):
+                    ok += 1
+                    break
+        return ok / trials
+
+    at_10 = success_rate(10.0)
+    assert at_10 >= 0.95 and at_10 > success_rate(5.0)

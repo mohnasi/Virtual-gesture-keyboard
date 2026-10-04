@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 STATE_LABELS = {
     SystemState.ACTIVE: "ACTIVE - typing enabled (30 FPS)",
-    SystemState.IDLE: "IDLE - show open palm 2 s to wake (5 FPS)",
+    SystemState.IDLE: "IDLE - show open palm 2 s to wake (10 FPS)",
     SystemState.DEEP_STANDBY: "DEEP STANDBY - thumb up x3 to resume (1 FPS)",
 }
 

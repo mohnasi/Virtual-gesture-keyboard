@@ -10,7 +10,7 @@ Design rules
 * Frames are handed to the inference thread through ``LatestFrameSlot`` - a
   single-slot, overwrite-on-write mailbox. Capture never blocks on inference
   and inference never processes a stale backlog; memory use is constant.
-* The capture rate follows the state machine (30 / 5 / 1 FPS) via a
+* The capture rate follows the state machine (30 / 10 / 1 FPS) via a
   ``fps_provider`` callable, so the sensor pipeline itself idles at low power.
 """
 from __future__ import annotations

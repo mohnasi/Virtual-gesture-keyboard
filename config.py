@@ -34,7 +34,7 @@ ENABLE_HUD: bool = True
 # --------------------------------------------------------------------------- #
 class SystemState(str, Enum):
     ACTIVE = "ACTIVE"              # 30 FPS, full inference, typing enabled
-    IDLE = "IDLE"                  # 5 FPS, motion-gated, wake gesture only
+    IDLE = "IDLE"                  # 10 FPS, motion-gated, wake gesture only
     DEEP_STANDBY = "DEEP_STANDBY"  # 1 FPS, typing hard-disabled, "On x3" only
 
 
@@ -51,12 +51,22 @@ class CameraConfig:
     flush_grabs_when_slow: int = 2   # discard driver-buffered frames at low FPS
 
 
+# Capture-rate budget per state. IDLE runs at 10 FPS (it was 5): at 5 FPS the
+# 2 s wake hold had only ~10 samples, so one or two motion-blurred frames
+# pushed the open-palm share under the 85 % bar and the wake "glitched". At
+# 10 FPS the same hold gets ~20 samples. The motion gate still skips
+# MediaPipe on a static scene, so the extra cost is mostly camera reads.
+ACTIVE_FPS: float = 30.0
+IDLE_FPS: float = 10.0
+DEEP_STANDBY_FPS: float = 1.0
+
+
 @dataclass(frozen=True)
 class PowerConfig:
     fps: Dict[SystemState, float] = field(default_factory=lambda: {
-        SystemState.ACTIVE: 30.0,
-        SystemState.IDLE: 5.0,
-        SystemState.DEEP_STANDBY: 1.0,
+        SystemState.ACTIVE: ACTIVE_FPS,
+        SystemState.IDLE: IDLE_FPS,
+        SystemState.DEEP_STANDBY: DEEP_STANDBY_FPS,
     })
 
 

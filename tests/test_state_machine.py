@@ -15,7 +15,7 @@ def make(cfg, state=SystemState.IDLE):
 
 def test_fps_budget_per_state(cfg):
     sm = make(cfg)
-    assert sm.target_fps == 5.0
+    assert sm.target_fps == 10.0
     sm.step(1.0, True, [WAKE])
     assert sm.target_fps == 30.0
     sm.step(2.0, True, [OFF3])
