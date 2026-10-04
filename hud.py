@@ -75,7 +75,12 @@ class HudSnapshot:
     last_event: Optional[GestureEvent] = None
     last_key: Optional[str] = None
     last_key_t: float = float("-inf")
-    alt_layer: bool = False
+    letters_enabled: bool = False             # an ASL model is loaded
+    letter_top: Tuple[Tuple[str, float], ...] = ()   # up to 3 (label, prob)
+    letter_candidate: Optional[str] = None    # letter currently being held
+    letter_progress: float = 0.0              # 0..1 of the 0.4 s dwell
+    letter_locked: Optional[str] = None       # just typed; relax to repeat
+    letter_threshold: float = 0.0
     trail: Tuple[Tuple[float, float], ...] = ()
     infer_ms: float = 0.0
     wake_progress: float = 0.0                # 0..1 open-palm hold
@@ -140,6 +145,8 @@ def describe_event(ev: Optional[GestureEvent]) -> str:
         return ""
     if ev.kind == GestureKind.SWIPE:
         return f"SWIPE {ev.direction.value} ({ev.pose.value})"
+    if ev.kind == GestureKind.LETTER:
+        return f"LETTER {ev.label} ({ev.confidence:.0%})"
     if ev.kind == GestureKind.HOLD:
         return f"HOLD {ev.pose.value}"
     return f"{ev.pose.value} x{ev.count}"
@@ -176,6 +183,8 @@ class HudRenderer:
         if snap.hand is not None and snap.hand.present:
             self._draw_skeleton(img, landmarks_to_pixels(snap.hand) * s, color)
         self._draw_swipe_arrow(img, snap, color)
+        if snap.state == SystemState.ACTIVE and snap.letters_enabled and not snap.gated:
+            self._draw_letter_panel(img, snap, color)
         self._draw_top_bar(img, snap, color)
         self._draw_bottom_bar(img, snap, color)
         if snap.gated:
@@ -254,6 +263,49 @@ class HudRenderer:
         right = f"{self._fps:.0f}/{snap.target_fps:.0f} FPS | {ml}"
         self._text(img, right, (W - self._text_w(right) - self._px(10), y), _WHITE)
 
+    def _draw_letter_panel(self, img, snap, color) -> None:
+        """Top-3 ASL guesses with confidence bars + the dwell progress bar."""
+        W = self.size[0]
+        pw, row = self._px(124), self._px(17)
+        x0, y0 = W - pw - self._px(6), self._px(26) + self._px(6)
+        rows = 3
+        y1 = y0 + row * (rows + 1) + self._px(10)
+        roi = img[y0:y1, x0:x0 + pw]
+        img[y0:y1, x0:x0 + pw] = cv2.convertScaleAbs(roi, alpha=0.35)
+
+        lx, bx = x0 + self._px(6), x0 + self._px(26)
+        bw = pw - self._px(66)
+        tick = bx + int(bw * min(1.0, snap.letter_threshold))
+        for i in range(rows):
+            yb = y0 + self._px(6) + i * row
+            if i >= len(snap.letter_top):
+                self._text(img, "-", (lx, yb + row - self._px(5)), _GREY)
+                continue
+            label, prob = snap.letter_top[i]
+            hot = label == snap.letter_candidate or label == snap.letter_locked
+            c = color if hot else (_WHITE if i == 0 else _GREY)
+            self._text(img, label, (lx, yb + row - self._px(5)), c, 1.1)
+            bh = self._px(7)
+            by = yb + (row - bh) // 2
+            cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (90, 90, 90), -1)
+            cv2.rectangle(img, (bx, by), (bx + int(bw * min(1.0, prob)), by + bh), c, -1)
+            cv2.line(img, (tick, by - 2), (tick, by + bh + 2), _WHITE, 1)
+            pct = f"{prob * 100:.0f}%"
+            self._text(img, pct, (x0 + pw - self._text_w(pct) - self._px(6),
+                                  yb + row - self._px(5)), c)
+
+        # Dwell bar: fills over 0.4 s while a letter is held steady.
+        yd = y0 + self._px(6) + rows * row + self._px(2)
+        if snap.letter_locked and not snap.letter_candidate:
+            self._text(img, f"relax to repeat {snap.letter_locked}",
+                       (lx, yd + self._px(10)), _GREY, 0.85)
+            return
+        bh = self._px(8)
+        cv2.rectangle(img, (lx, yd), (x0 + pw - self._px(6), yd + bh), _GREY, 1)
+        fill = int((pw - self._px(12)) * snap.letter_progress)
+        if fill > 0:
+            cv2.rectangle(img, (lx, yd), (lx + fill, yd + bh), color, -1)
+
     def _draw_bottom_bar(self, img, snap, color) -> None:
         W, H = self.size
         line = self._px(20)
@@ -273,8 +325,8 @@ class HudRenderer:
         badge = ""
         if snap.state == SystemState.DEEP_STANDBY:
             badge = "TYPING OFF"
-        elif snap.alt_layer:
-            badge = "ALT LAYER"
+        elif snap.state == SystemState.ACTIVE and not snap.letters_enabled:
+            badge = "NO ASL MODEL"
         if badge:
             self._text(img, badge, (W - self._text_w(badge) - x, y1), color)
 
@@ -296,7 +348,8 @@ class HudRenderer:
                 hint = f"Thumb down {snap.off_progress}/{snap.reps_needed} -> standby"
                 progress = snap.off_progress / snap.reps_needed
             else:
-                hint = "Swipe to type | thumb down x3 to sleep"
+                hint = ("Hold a letter 0.4 s | palm swipe = edit" if snap.letters_enabled
+                        else "Palm swipe: R space, L delete, D enter")
         else:
             hint = f"Thumb up x3 to resume ({snap.on_progress}/{snap.reps_needed})"
             progress = snap.on_progress / snap.reps_needed

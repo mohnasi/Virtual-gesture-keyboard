@@ -22,7 +22,7 @@ A low-power, headless background service that turns mid-air hand gestures into r
 
 Physical keyboards demand two things many people cannot give: **repeated tactile impact** and **fine, isolated finger control**. For people living with severe arthritis, repetitive strain injury (RSI), carpal tunnel syndrome, or recovering from a stroke, every keypress can hurt or simply not be possible. On the other side, technicians in labs, kitchens, workshops or clean rooms often wear soiled or sterile gloves and *shouldn't* touch a shared keyboard at all.
 
-Many of these users still have good **gross arm and hand mobility**: they can raise a hand, hold a shape, and sweep it left or right. Gesture Virtual Keyboard is built around exactly that ability:
+Many of these users still have good **gross arm and hand mobility**: they can raise a hand, hold a shape, and sweep it left or right. Gesture Virtual Keyboard types letters from **static ASL fingerspelling handshapes** that are held, not struck. Editing uses large palm sweeps:
 
 - **Tactile-free.** Large, slow, forgiving motions instead of precise key strikes.
 - **Works everywhere.** Keystrokes are injected at the OS level (via `pynput`), so it types into any focused app: browser, IDE, terminal, chat.
@@ -58,7 +58,9 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
  │  GestureClassifier ── Pose classifier (FIST, POINT, PEACE, … THUMB_UP/DOWN)      │
  │                    ├─ SwipeDetector       (wrist trajectory, palm-length units)  │
  │                    ├─ StaticHoldDetector  (wake: open palm, steady 2 s)          │
- │                    └─ RepetitionDetector  ("Off ×3" / "On ×3")                   │
+ │                    ├─ RepetitionDetector  ("Off ×3" / "On ×3")                   │
+ │                    └─ LetterDetector      (Random Forest → static ASL A–Z,       │
+ │                                            0.4 s dwell, 0.2 s release lockout)   │
  │               ▼                                                                  │
  │  ┌─────────────────────────── 3-tier State Machine ───────────────────────────┐  │
  │  │                                                                            │  │
@@ -99,17 +101,18 @@ Entering or leaving DEEP STANDBY shows a native desktop notification. The tray m
 
 ## Live telemetry HUD
 
-<img src="docs/hud_preview.png" alt="HUD in ACTIVE, IDLE and DEEP STANDBY (rendered from synthetic test data)" width="100%"/>
+<img src="docs/hud_preview.png" alt="HUD: holding a letter, a palm swipe for space, and the IDLE wake hold (synthetic test data)" width="100%"/>
 
-<sub>The three states, rendered by the HUD from the project's synthetic test hands.</sub>
+<sub>Left to right: holding a letter (top-3 guesses and dwell bar), a palm swipe typing a space, and the wake hold in IDLE. Rendered by the HUD from the project's synthetic test hands.</sub>
 
 A small window (480×270 by default) opens in the **top-right corner** of the screen and stays on top. It shows:
 
 | Where | What |
 |---|---|
 | Video | Live webcam feed with the **21-joint MediaPipe hand skeleton** drawn over your hand, plus the recent wrist trajectory (cyan trail). A large arrow flashes when a swipe is recognised |
+| ASL panel (ACTIVE) | The classifier's **top-3 letter guesses with confidence %**. A tick on each bar marks the typing threshold, and a **dwell bar** fills over the 0.4 s hold. After a letter is typed the panel shows "relax to repeat" |
 | Top bar | **System state** (colour-coded like the tray), measured vs. target FPS, and MediaPipe inference time, or `ML skipped` when the motion gate is sleeping |
-| Bottom bar | **Current pose** (`POINT`, `OPEN_PALM`, …), the **last recognised gesture** with the key it typed (e.g. `SWIPE RIGHT (POINT) -> 't'`), the `ALT LAYER` / `TYPING OFF` badges, and progress bars for the wake hold and the ×3 sequences |
+| Bottom bar | **Current pose** (`POINT`, `OPEN_PALM`, …), the **last recognised gesture** with the key it typed (e.g. `LETTER H (88%) -> 'h'` or `SWIPE RIGHT (OPEN_PALM) -> SPACE`), the `TYPING OFF` / `NO ASL MODEL` badges, and progress bars for the wake hold and the ×3 sequences |
 
 - **Move it** by dragging anywhere on the video with the mouse. It also reopens in the top-right corner every time.
 - **It never steals focus.** On Windows the HUD is a no-activate tool window, so clicking or dragging it never takes keyboard focus away from the app you're typing into. On macOS and Linux, click back into your app after moving the HUD.
@@ -127,40 +130,79 @@ A small window (480×270 by default) opens in the **top-right corner** of the sc
 | **Wake** | Raise an **open palm** (all fingers + thumb spread) and hold it still for **2 s** | IDLE | → ACTIVE |
 | **Off, Off, Off** | Closed fist, **thumb pointing down**, then relax. Repeat **3×** within 6 s | ACTIVE | → DEEP STANDBY (typing disabled) |
 | **On, On, On** | Closed fist, **thumb pointing up**, hold ~1 s, then lower. Repeat **3×** within 12 s | DEEP STANDBY | → IDLE |
-| **Clutch** | Move with a **closed fist** | ACTIVE | Reposition your hand without typing |
+| **Reposition** | Move your hand | ACTIVE | Moving hands never type. Letters need a still hand |
 | **Walk away** | Take your hand out of view for 2 s | ACTIVE | → IDLE (auto-sleep) |
 
-### Typing: hand shape × swipe direction
+### Typing: static ASL fingerspelling (A–Z)
 
-Hold a hand shape and make one smooth sweep (about 1–2 palm-lengths). The **shape picks the row** and the **direction picks the key**. The 20 most frequent English letters are on the base layer.
+Form an ASL fingerspelling handshape and **hold it still for 0.4 s**. The letter is typed once.
 
-| Hand shape held during the swipe | ← Left | → Right | ↑ Up | ↓ Down |
-|---|:-:|:-:|:-:|:-:|
-| **POINT** (index finger) | `e` | `t` | `a` | `o` |
-| **PEACE** (index + middle) | `i` | `n` | `s` | `h` |
-| **THREE** (index + middle + ring) | `r` | `d` | `l` | `c` |
-| **FOUR** (four fingers, thumb tucked) | `u` | `m` | `w` | `f` |
-| **PINCH** (thumb tip touches index tip) | `g` | `y` | `p` | `b` |
-| **OPEN PALM** | ⌫ Backspace | ␣ Space | ⇧ Alt layer | ⏎ Enter |
+- **Double letters ("LL"):** relax, or drop your hand, for at least **0.2 s**, then sign the letter again.
+- **Changing letters:** going from one letter straight into a different one needs no pause.
+- **J and Z:** both are signed with a movement in ASL. In v1 they are treated as **static holds** of their final handshape.
+- **No accidental typing:** a hand that is moving never types. The open palm and thumb-down control poses are never read as letters. Letters also pause for 1.5 s after a thumb-down, so the fist you relax into during "Off, Off, Off" isn't typed as A or S.
 
-**Alt layer (one-shot).** Open palm + swipe up, then a single stroke from this table:
+Letters come from a scikit-learn **Random Forest** trained on MediaPipe hand landmarks (see [Training the ASL model](#training-the-asl-model)). Without a trained model the daemon still runs, and the HUD shows `NO ASL MODEL`.
 
-| Shape | ← | → | ↑ | ↓ |
-|---|:-:|:-:|:-:|:-:|
-| POINT | `v` | `k` | `j` | `x` |
-| PEACE | `q` | `z` | `.` | `,` |
-| THREE | `1` | `2` | `3` | `4` |
-| FOUR | `5` | `6` | `7` | `8` |
-| PINCH | `9` | `0` | `?` | `'` |
+### Editing: open-palm swipes
 
-*Example:* "hi" is PEACE ↓ then PEACE ←.
+Spread your hand open and make one smooth sweep of about 1–2 palm-lengths:
 
-Both layouts are plain dictionaries in [`config.py`](config.py), so you can remap them to suit your own mobility or language.
+| Open palm swipe | Key |
+|---|---|
+| → Right | ␣ Space |
+| ← Left | ⌫ Backspace |
+| ↓ Down | ⏎ Enter |
 
-**Built-in ergonomics:**
-- Distances are measured in palm-lengths, so the same motion works at 40 cm or 1.5 m from the camera.
+- Swipe distances are measured in palm-lengths, so the same motion works at 40 cm or 1.5 m from the camera.
 - Bringing your hand back after a swipe is recognised as a return stroke and is not typed.
-- Keys are suppressed for 0.75 s after any state change, so waking up never types a stray character.
+- The mapping is `EDIT_SWIPES` in [`config.py`](config.py).
+
+---
+
+## Training the ASL model
+
+The model isn't shipped in the repo. You build it once with two scripts. Both use the same MediaPipe tracker and the same `features.py` as the live app, so training and runtime features always match.
+
+**1. Download data** (needs a free Kaggle account: kaggle.com → Settings → API → *Create New Token*, then save `kaggle.json` to `%USERPROFILE%\.kaggle\`):
+
+```powershell
+pip install kaggle
+kaggle datasets download -d grassknoted/asl-alphabet -p data\raw\asl-alphabet --unzip
+kaggle datasets download -d mrgeislinger/asl-rgb-depth-fingerspelling-spelling-it-out -p data\raw\spelling-it-out --unzip
+```
+
+| Dataset | Content | Why |
+|---|---|---|
+| [ASL Alphabet](https://www.kaggle.com/datasets/grassknoted/asl-alphabet) | 87,000 images (200×200), A–Z (+ space/del/nothing, which are skipped), GPL-2 | Covers all 26 letters, but the images are near-identical, so its scores are optimistic |
+| [Spelling It Out](https://empslocal.ex.ac.uk/people/staff/np331/index.php?section=FingerSpellingDataset) (Pugeault & Bowden 2011) | 5 signers, 24 static letters (no J/Z) | Lets you validate on **people the model has never seen**. Cite the paper |
+
+**2. Extract landmarks.** This writes `data/features/*.npz`. The script reports the detection rate per letter, and `data/` is git-ignored.
+
+```powershell
+python tools\extract_landmarks.py data\raw\asl-alphabet --out data\features\asl_alphabet.npz --group asl_alphabet --max-per-class 800
+python tools\extract_landmarks.py data\raw\spelling-it-out --out data\features\spelling_it_out.npz --signer-level 1 --include "color_"
+```
+
+Labels come from the image's folder name (single letters only). Look at the unzipped layout first: `--signer-level K` tells the script which folder below the root names the signer.
+
+**3. Train.** This writes `models/asl_rf.pkl` and a report, `models/asl_rf.txt`:
+
+```powershell
+python tools\train_asl.py data\features\asl_alphabet.npz data\features\spelling_it_out.npz
+```
+
+- **Validation:** cross-validates with `GroupKFold` **by signer**. With a single signer it falls back to a stratified split and prints a warning that the score is optimistic.
+- **Threshold:** it calibrates the confidence threshold at which out-of-fold predictions are ≥ 95% correct, and saves it in the model.
+- **Report:** lists the most common confusions. Expect E/M/N/S/T and U/V/R.
+- **Held-out test:** `--test other.npz` scores the final model on a dataset it never trained on.
+
+**4. Run** `python main.py`. The model is loaded from `models/asl_rf.pkl` (or `--asl-model PATH`).
+
+> **Notes**
+> - A pickled model only reliably loads in the scikit-learn version that saved it. Pin that version in `requirements.txt` once you're happy with a model.
+> - Only load model files you trained yourself: unpickling can run arbitrary code.
+> - Fingerspelling depends on fine finger and thumb placement, which is hard for some of the users this project targets. The single biggest accuracy gain is training on the user's own hand.
 
 ---
 
@@ -211,6 +253,7 @@ python main.py
 | `--start-active` | off | Start in ACTIVE instead of IDLE |
 | `--no-mirror` | off | Disable the selfie-view mirror |
 | `--hud` / `--no-hud` | `ENABLE_HUD` | Show or hide the live telemetry window for this run |
+| `--asl-model PATH` | `models/asl_rf.pkl` | Trained ASL letter model to load |
 | `--no-tray` / `--no-toasts` | off | Run without the tray icon / notifications |
 | `--log-level` | `INFO` | `DEBUG` logs every recognised gesture |
 
@@ -223,17 +266,22 @@ Logs rotate in `logs/gvk.log`. This matters most under `pythonw`, where there's 
 ```
 gesture-virtual-keyboard/
 ├── main.py              # entry point: wiring, signals, ordered shutdown
-├── config.py            # every threshold, FPS budget and the key layouts
+├── config.py            # every threshold, FPS budget, ASL dwell and edit swipes
 ├── camera.py            # CaptureWorker (sole camera owner) + LatestFrameSlot
 ├── motion_gate.py       # cv2.absdiff motion gate with hold-open latch
 ├── tracker.py           # MediaPipe backends + landmark normalisation
-├── gestures.py          # pose classifier, TemporalBuffer, GestureClassifier
+├── gestures.py          # pose classifier, TemporalBuffer, detectors incl. LetterDetector
+├── features.py          # ASL feature vector (shared by training and runtime)
+├── asl_classifier.py    # loads/validates the Random Forest bundle
 ├── state_machine.py     # ACTIVE / IDLE / DEEP_STANDBY transitions
 ├── keyboard_output.py   # KeyMapper + pynput injection worker
 ├── ui.py                # pystray tray icon + toast notifications
 ├── hud.py               # live telemetry HUD (renderer + draggable window)
 ├── pipeline.py          # InferenceWorker: gate → track → classify → act
-├── tests/               # 80 hardware-free tests (synthetic hands, fake camera/GUI)
+├── tools/
+│   ├── extract_landmarks.py  # dataset images -> landmark features (.npz)
+│   └── train_asl.py          # signer-grouped CV, threshold calibration, .pkl
+├── tests/               # 114 hardware-free tests (synthetic hands, fake camera/GUI)
 └── docs/ARCHITECTURE.md # design review & threading model
 ```
 
@@ -243,7 +291,7 @@ The test suite needs **no webcam, no MediaPipe and no keyboard backend**. It dri
 
 ```bash
 pip install -r requirements-dev.txt
-pytest          # 80 tests
+pytest          # 114 tests
 ruff check .
 ```
 
@@ -252,14 +300,17 @@ CI runs both on Python 3.10, 3.11, 3.12 and 3.13.
 ## Extending
 
 - **New gesture:** subclass `gestures.Detector`, implement `update(record, buffer)`, and pass it via `GestureClassifier(extra_detectors=[...])`. The buffer gives you the last 45 frames of normalised landmarks and the wrist trajectory.
-- **New layout:** edit `BASE_LAYOUT` / `ALT_LAYOUT` in `config.py`.
+- **Editing keys:** edit `EDIT_SWIPES` in `config.py`.
+- **Letters:** retrain with more data, including your own recordings. Dwell, lockout, smoothing and confidence settings are in `AslConfig`.
 - **Tuning:** every threshold is a named field in `config.py` (finger-extension ratio, swipe speed and distance, latch time, sequence windows, and so on).
 
 ## Roadmap
 
 - [ ] Per-user calibration wizard (records your own pose templates and swipe speed)
 - [x] Live telemetry HUD (skeleton, state, pose, gesture)
-- [ ] Key-layout cheat-sheet overlay in the HUD for new users
+- [x] Static ASL fingerspelling (Random Forest, dwell-based commit)
+- [ ] Record-your-own-hand tool for per-user ASL training data
+- [ ] Motion-based J and Z (trajectory detector on top of the letter handshape)
 - [ ] Word prediction / auto-complete to cut the strokes needed per word
 - [ ] Learned temporal classifier (1D-CNN / GRU over the landmark buffer) as a drop-in `Detector`
 

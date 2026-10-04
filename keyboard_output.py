@@ -1,8 +1,8 @@
 """
 Gesture -> keystroke mapping and OS-level injection.
 
-``KeyMapper`` turns (pose, swipe direction) into a key token using the layouts
-in ``config.py`` (with a one-shot alternate layer for rare letters / digits).
+``KeyMapper`` turns a committed ASL letter into a-z, and an OPEN_PALM swipe
+into Space / Backspace / Enter (``config.EDIT_SWIPES``).
 
 ``KeyboardOutput`` injects keys globally with ``pynput.keyboard.Controller``
 (SendInput on Windows, Quartz events on macOS, XTest on X11) into whichever
@@ -18,7 +18,7 @@ import queue
 import threading
 from typing import Optional
 
-from config import BACKSPACE, ENTER, LAYER, SPACE, KeyboardConfig
+from config import BACKSPACE, ENTER, SPACE, KeyboardConfig
 from gestures import GestureEvent, GestureKind
 
 log = logging.getLogger(__name__)
@@ -27,30 +27,23 @@ _STOP = object()
 
 
 class KeyMapper:
+    """LETTER events -> a-z; OPEN_PALM swipes -> Space / Backspace / Enter."""
+
     def __init__(self, cfg: KeyboardConfig) -> None:
         self._cfg = cfg
-        self._alt = False
-
-    @property
-    def alt_layer(self) -> bool:
-        return self._alt
 
     def reset(self) -> None:
-        self._alt = False
+        """Stateless; kept so state transitions can call it uniformly."""
 
     def map(self, event: GestureEvent) -> Optional[str]:
-        if event.kind != GestureKind.SWIPE or event.direction is None:
-            return None
-        layout = self._cfg.alt_layout if self._alt else self._cfg.base_layout
-        key = layout.get(event.pose.value, {}).get(event.direction.value)
-        if key is None:                 # FIST clutch, UNKNOWN pose, unmapped combo
-            return None
-        if key == LAYER:
-            self._alt = not self._alt
-            log.info("Alternate layer %s", "armed" if self._alt else "cancelled")
-            return None
-        self._alt = False               # alternate layer is one-shot
-        return key
+        if event.kind == GestureKind.LETTER:
+            label = event.label or ""
+            if len(label) != 1 or not label.isalpha():
+                return None
+            return label.upper() if self._cfg.letter_case == "upper" else label.lower()
+        if event.kind == GestureKind.SWIPE and event.direction is not None:
+            return self._cfg.edit_swipes.get(event.pose.value, {}).get(event.direction.value)
+        return None
 
 
 class KeyboardOutput:

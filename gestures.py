@@ -13,6 +13,7 @@ Layers
       * ``SwipeDetector``      wrist-trajectory strokes -> SWIPE(direction, pose)
       * ``StaticHoldDetector`` steady pose for N seconds -> HOLD(pose)
       * ``RepetitionDetector`` pose entered K times in a window -> SEQUENCE(pose)
+      * ``LetterDetector``     static ASL letter held 0.4 s     -> LETTER(label)
 
 Add a new gesture by subclassing ``Detector`` and passing it to
 ``GestureClassifier(extra_detectors=[...])``.
@@ -23,11 +24,11 @@ import math
 from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Deque, Iterable, List, Optional
+from typing import Deque, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from config import GestureConfig, PoseConfig, SystemState
+from config import AslConfig, GestureConfig, PoseConfig, SystemState
 from tracker import (
     INDEX_MCP, INDEX_PIP, INDEX_TIP, MIDDLE_PIP, MIDDLE_TIP, PINKY_PIP, PINKY_TIP,
     RING_PIP, RING_TIP, THUMB_IP, THUMB_MCP, THUMB_TIP, HandObservation,
@@ -159,6 +160,7 @@ class GestureKind(str, Enum):
     SWIPE = "SWIPE"
     HOLD = "HOLD"
     SEQUENCE = "SEQUENCE"
+    LETTER = "LETTER"
 
 
 class Direction(str, Enum):
@@ -179,6 +181,8 @@ class GestureEvent:
     timestamp: float
     direction: Optional[Direction] = None
     count: int = 1
+    label: Optional[str] = None            # LETTER events: "A".."Z"
+    confidence: float = 0.0                # LETTER events: smoothed probability
 
 
 class Detector:
@@ -400,6 +404,141 @@ class RepetitionDetector(Detector):
         return None
 
 
+class LetterDetector(Detector):
+    """Dwell-based commit of static ASL letters.
+
+    Per frame (ACTIVE only):
+      1. Skip when there is no hand, the rule-based pose is a control pose
+         (OPEN_PALM / THUMB_DOWN), a thumb-down was seen in the last 1.5 s
+         (mid "Off, Off, Off"), or the wrist is moving (swipes, repositioning).
+      2. Otherwise ask the model for class probabilities (rate-limited to
+         ``max_predict_hz``) and smooth them with an EMA so M/N-style flicker
+         does not reset the dwell.
+      3. The top class is a *stable letter* if its smoothed probability clears
+         the threshold.
+      4. A stable letter held for ``dwell_s`` (0.4 s) is committed once.
+      5. Lockout: that letter cannot fire again until the sign has been broken
+         (another letter, no hand, low confidence, motion) for ``release_s``
+         (0.2 s). This is how double letters ("LL") are typed.
+
+    ``model`` needs ``classes``, ``threshold`` and ``predict_proba(obs)``.
+    """
+
+    GRACE_S = 0.1          # brief dropouts (one or two frames) don't reset a dwell
+
+    def __init__(self, model, cfg: AslConfig) -> None:
+        self._model = model
+        self._cfg = cfg
+        self.threshold = (cfg.min_confidence if cfg.min_confidence is not None
+                          else float(model.threshold))
+        self._classes: Sequence[str] = tuple(model.classes)
+        self._suppress = {Pose(p) for p in cfg.suppress_poses}
+        self._cooldown_poses = {Pose(p) for p in cfg.cooldown_poses}
+        self._enabled = True
+        self.reset()
+
+    # ----------------------------------------------------------- telemetry -- #
+    @property
+    def progress(self) -> float:
+        if self.candidate is None or self._cand_t0 is None or self._last_t is None:
+            return 0.0
+        return min(1.0, (self._last_t - self._cand_t0) / self._cfg.dwell_s)
+
+    # ------------------------------------------------------------ detector -- #
+    def configure(self, state, fps):
+        self._enabled = state == SystemState.ACTIVE
+        if not self._enabled:
+            self.reset()
+
+    def reset(self) -> None:
+        self._probs: Optional[np.ndarray] = None
+        self._prev: Optional[FrameRecord] = None
+        self._speed = 0.0
+        self._last_predict_t = float("-inf")
+        self._last_t: Optional[float] = None
+        self.top: Tuple[Tuple[str, float], ...] = ()
+        self.candidate: Optional[str] = None
+        self._cand_t0: Optional[float] = None
+        self._miss_t0: Optional[float] = None
+        self.locked: Optional[str] = None
+        self._release_t0: Optional[float] = None
+        self._cooldown_until = float("-inf")
+
+    def update(self, rec, buf):
+        if not self._enabled:
+            return None
+        t = rec.t
+        self._last_t = t
+        stable = self._stable_letter(rec)
+
+        # Lockout bookkeeping for the last committed letter.
+        if self.locked is not None:
+            if stable == self.locked:
+                self._release_t0 = None
+            else:
+                if self._release_t0 is None:
+                    self._release_t0 = t
+                if t - self._release_t0 >= self._cfg.release_s:
+                    self.locked, self._release_t0 = None, None
+
+        # Dwell bookkeeping for the current candidate.
+        if stable is None and self.candidate is not None:
+            if self._miss_t0 is None:
+                self._miss_t0 = t
+            if t - self._miss_t0 > self.GRACE_S:
+                self.candidate, self._cand_t0, self._miss_t0 = None, None, None
+            return None
+        self._miss_t0 = None
+        if stable is None or stable == self.locked:
+            self.candidate, self._cand_t0 = None, None
+            return None
+        if stable != self.candidate:
+            self.candidate, self._cand_t0 = stable, t
+            return None
+        if t - self._cand_t0 < self._cfg.dwell_s:
+            return None
+
+        conf = dict(self.top).get(stable, 0.0)
+        self.locked, self._release_t0 = stable, None
+        self.candidate, self._cand_t0 = None, None
+        return GestureEvent(GestureKind.LETTER, rec.pose or Pose.UNKNOWN, t,
+                            label=stable, confidence=conf)
+
+    # ------------------------------------------------------------- helpers -- #
+    def _stable_letter(self, rec: FrameRecord) -> Optional[str]:
+        obs = rec.obs
+        if not obs.present:
+            self._probs, self._prev, self._speed, self.top = None, None, 0.0, ()
+            return None
+
+        prev, self._prev = self._prev, rec
+        if prev is not None and rec.t > prev.t:
+            palm = 0.5 * (obs.palm_px + prev.obs.palm_px)
+            inst = float(np.linalg.norm(obs.wrist_px - prev.obs.wrist_px)) / palm / (rec.t - prev.t)
+            self._speed = 0.5 * inst + 0.5 * self._speed
+
+        if rec.pose in self._cooldown_poses:
+            self._cooldown_until = rec.t + self._cfg.cooldown_s
+        if rec.pose in self._suppress or rec.t < self._cooldown_until:
+            self._probs, self.top = None, ()
+            return None
+        if self._speed > self._cfg.max_steady_speed:
+            return None
+
+        if self._probs is None or rec.t - self._last_predict_t >= 1.0 / self._cfg.max_predict_hz:
+            p = self._model.predict_proba(obs)
+            a = self._cfg.smoothing
+            self._probs = p if self._probs is None else a * p + (1.0 - a) * self._probs
+            self._last_predict_t = rec.t
+            order = np.argsort(self._probs)[::-1][:3]
+            self.top = tuple((self._classes[i], float(self._probs[i])) for i in order)
+
+        label, prob = self.top[0]
+        if prob >= self.threshold and len(label) == 1 and label.isalpha():
+            return label.upper()
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # Façade
 # --------------------------------------------------------------------------- #
@@ -407,7 +546,8 @@ class GestureClassifier:
     """Feeds observations through the buffer and every registered detector."""
 
     def __init__(self, gesture_cfg: GestureConfig, pose_cfg: PoseConfig,
-                 extra_detectors: Iterable[Detector] = ()) -> None:
+                 extra_detectors: Iterable[Detector] = (),
+                 letter_model=None, asl_cfg: Optional[AslConfig] = None) -> None:
         self._pose_cfg = pose_cfg
         self.buffer = TemporalBuffer(gesture_cfg.buffer_len)
         self.wake = StaticHoldDetector(Pose.OPEN_PALM, gesture_cfg.wake_hold_s,
@@ -422,6 +562,11 @@ class GestureClassifier:
             self.on_sequence,
             *extra_detectors,
         ]
+        # Static ASL letters (only when a trained model is available).
+        self.letters: Optional[LetterDetector] = None
+        if letter_model is not None:
+            self.letters = LetterDetector(letter_model, asl_cfg or AslConfig())
+            self.detectors.append(self.letters)
 
     def configure(self, state: SystemState, fps: float) -> None:
         for d in self.detectors:

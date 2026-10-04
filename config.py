@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # =========================================================================== #
 #  ENABLE_HUD - live telemetry window (webcam feed + hand skeleton + state).
@@ -149,39 +149,44 @@ class StateMachineConfig:
 
 
 # --------------------------------------------------------------------------- #
-# Keyboard layout: (pose, swipe direction) -> key
+# Typing: static ASL letters (A-Z) + gross-motor editing swipes
 # --------------------------------------------------------------------------- #
 # Special key tokens understood by keyboard_output.py
-SPACE, BACKSPACE, ENTER, LAYER = "<space>", "<backspace>", "<enter>", "<layer>"
+SPACE, BACKSPACE, ENTER = "<space>", "<backspace>", "<enter>"
 
-# Base layer: the 20 most frequent English letters + editing keys.
-# Directions are from the USER's point of view (mirrored selfie view).
-BASE_LAYOUT: Dict[str, Dict[str, str]] = {
-    "POINT":     {"LEFT": "e", "RIGHT": "t", "UP": "a", "DOWN": "o"},
-    "PEACE":     {"LEFT": "i", "RIGHT": "n", "UP": "s", "DOWN": "h"},
-    "THREE":     {"LEFT": "r", "RIGHT": "d", "UP": "l", "DOWN": "c"},
-    "FOUR":      {"LEFT": "u", "RIGHT": "m", "UP": "w", "DOWN": "f"},
-    "PINCH":     {"LEFT": "g", "RIGHT": "y", "UP": "p", "DOWN": "b"},
-    "OPEN_PALM": {"LEFT": BACKSPACE, "RIGHT": SPACE, "UP": LAYER, "DOWN": ENTER},
-    # "FIST" is deliberately unmapped: it is the clutch used to reposition.
-}
-
-# One-shot alternate layer (OPEN_PALM + swipe UP, then one stroke).
-ALT_LAYOUT: Dict[str, Dict[str, str]] = {
-    "POINT":     {"LEFT": "v", "RIGHT": "k", "UP": "j", "DOWN": "x"},
-    "PEACE":     {"LEFT": "q", "RIGHT": "z", "UP": ".", "DOWN": ","},
-    "THREE":     {"LEFT": "1", "RIGHT": "2", "UP": "3", "DOWN": "4"},
-    "FOUR":      {"LEFT": "5", "RIGHT": "6", "UP": "7", "DOWN": "8"},
-    "PINCH":     {"LEFT": "9", "RIGHT": "0", "UP": "?", "DOWN": "'"},
-    "OPEN_PALM": {"LEFT": BACKSPACE, "RIGHT": SPACE, "UP": LAYER, "DOWN": ENTER},
+# Text editing stays on large, low-precision OPEN_PALM sweeps. Directions are
+# from the USER's point of view (mirrored selfie view). Every other
+# pose/direction combination is deliberately unmapped.
+EDIT_SWIPES: Dict[str, Dict[str, str]] = {
+    "OPEN_PALM": {"RIGHT": SPACE, "LEFT": BACKSPACE, "DOWN": ENTER},
 }
 
 
 @dataclass(frozen=True)
 class KeyboardConfig:
-    base_layout: Dict[str, Dict[str, str]] = field(default_factory=lambda: BASE_LAYOUT)
-    alt_layout: Dict[str, Dict[str, str]] = field(default_factory=lambda: ALT_LAYOUT)
+    edit_swipes: Dict[str, Dict[str, str]] = field(default_factory=lambda: EDIT_SWIPES)
+    letter_case: str = "lower"             # "lower" | "upper"
     max_queue: int = 16                    # drop keys rather than lag behind
+
+
+@dataclass(frozen=True)
+class AslConfig:
+    """Static ASL fingerspelling (Random Forest trained by tools/train_asl.py)."""
+    model_path: str = "models/asl_rf.pkl"  # relative to the project folder
+    dwell_s: float = 0.4                   # same letter held this long -> typed
+    release_s: float = 0.2                 # lockout: break the sign this long
+                                           # before the SAME letter can repeat
+    min_confidence: Optional[float] = None # None -> threshold calibrated in training
+    smoothing: float = 0.5                 # EMA alpha on class probabilities
+    max_steady_speed: float = 1.2          # palm lengths/s; faster = moving, no letters
+    max_predict_hz: float = 15.0           # Random Forest calls per second (CPU cap)
+    # Rule-based control poses that must never be read as letters:
+    # OPEN_PALM = editing swipes / wake, THUMB_DOWN = "Off, Off, Off".
+    suppress_poses: Tuple[str, ...] = ("OPEN_PALM", "THUMB_DOWN")
+    # After a thumb-down, letters pause this long so the fist you relax into
+    # between "Off, Off, Off" repetitions is not typed as A / S.
+    cooldown_poses: Tuple[str, ...] = ("THUMB_DOWN",)
+    cooldown_s: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -224,6 +229,7 @@ class Config:
     keyboard: KeyboardConfig = field(default_factory=KeyboardConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     hud: HudConfig = field(default_factory=HudConfig)
+    asl: AslConfig = field(default_factory=AslConfig)
     log_level: str = "INFO"
 
 

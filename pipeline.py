@@ -119,7 +119,10 @@ class InferenceWorker(threading.Thread):
             if key is not None:
                 self._keyboard.submit(key)
                 self._last_key, self._last_key_t = key, frame.timestamp
-                log.info("Key %r <- %s + swipe %s", key, ev.pose.value, ev.direction.value)
+                if ev.kind == GestureKind.LETTER:
+                    log.info("Key %r <- ASL %s (%.0f%%)", key, ev.label, ev.confidence * 100)
+                else:
+                    log.info("Key %r <- %s + swipe %s", key, ev.pose.value, ev.direction.value)
 
         if events:
             # Control gestures (HOLD / SEQUENCE) are more informative than a
@@ -149,7 +152,12 @@ class InferenceWorker(threading.Thread):
             last_event=self._last_event,
             last_key=self._last_key,
             last_key_t=self._last_key_t,
-            alt_layer=self._mapper.alt_layer,
+            letters_enabled=clf.letters is not None,
+            letter_top=clf.letters.top if clf.letters else (),
+            letter_candidate=clf.letters.candidate if clf.letters else None,
+            letter_progress=clf.letters.progress if clf.letters else 0.0,
+            letter_locked=clf.letters.locked if clf.letters else None,
+            letter_threshold=clf.letters.threshold if clf.letters else 0.0,
             trail=trail,
             infer_ms=infer_ms,
             wake_progress=clf.wake.progress,

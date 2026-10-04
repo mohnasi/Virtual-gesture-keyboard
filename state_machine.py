@@ -124,8 +124,12 @@ class StateMachine:
             if hand_present is False and now - self._last_hand_t >= self._cfg.no_hand_timeout_s:
                 self._add(res, SystemState.IDLE, "no hand for %.1fs" % self._cfg.no_hand_timeout_s, now)
                 return res
-            if now - self._entered_t >= self._cfg.post_transition_grace_s:
-                res.typing_events = [e for e in events if e.kind == GestureKind.SWIPE]
+            # Letters need a deliberate 0.4 s dwell that can only start after
+            # the transition, so they pass at once; swipes wait out the grace
+            # period (the hand is often still moving from the wake gesture).
+            in_grace = now - self._entered_t < self._cfg.post_transition_grace_s
+            res.typing_events = [e for e in events if e.kind == GestureKind.LETTER
+                                 or (e.kind == GestureKind.SWIPE and not in_grace)]
 
         elif s == SystemState.IDLE:
             if any(e.kind == GestureKind.HOLD and e.pose == Pose.OPEN_PALM for e in events):

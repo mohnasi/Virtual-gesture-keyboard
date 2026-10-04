@@ -87,7 +87,7 @@ def test_event_and_key_labels():
 def test_recent_swipe_and_typed_key_render_without_error():
     r = HudRenderer(HUD, COLORS)
     ev = GestureEvent(GestureKind.SWIPE, Pose.POINT, 9.8, Direction.LEFT)
-    img = r.render(_snap(last_event=ev, last_key="e", last_key_t=9.8, alt_layer=True,
+    img = r.render(_snap(last_event=ev, last_key="e", last_key_t=9.8, letters_enabled=True,
                          trail=((300.0, 200.0), (340.0, 200.0), (380.0, 200.0))))
     assert img.shape == (270, 480, 3)
 
@@ -311,3 +311,41 @@ def test_full_daemon_with_hud_shuts_down_cleanly(monkeypatch):
     assert app.run() == 0
     assert gui.frames and not gui.windows               # frames shown, window destroyed
     assert not app.capture.is_alive() and not app.inference.is_alive()
+
+
+# ------------------------------------------------------------ ASL panel --- #
+def _letter_snap(**kw):
+    base = dict(letters_enabled=True, letter_top=(("L", 0.91), ("D", 0.05), ("G", 0.02)),
+                letter_candidate="L", letter_progress=0.5, letter_threshold=0.6)
+    base.update(kw)
+    return _snap(**base)
+
+
+def test_letter_panel_shows_top3_and_dwell_bar():
+    r = HudRenderer(HUD, COLORS)
+    with_panel = r.render(_letter_snap())
+    without = r.render(_snap())
+    panel = (slice(32, 120), slice(480 - 130, 480 - 6))
+    assert not np.array_equal(with_panel[panel], without[panel])
+    # the dwell bar is filled with the ACTIVE colour up to ~50 %
+    green = np.array(COLORS[SystemState.ACTIVE][::-1])
+    assert (np.abs(with_panel[panel].astype(int) - green).sum(axis=2) < 10).any()
+
+
+def test_letter_panel_progress_changes_pixels():
+    r = HudRenderer(HUD, COLORS)
+    a = r.render(_letter_snap(letter_progress=0.1))
+    b = r.render(_letter_snap(letter_progress=0.9))
+    assert not np.array_equal(a, b)
+
+
+def test_locked_letter_and_missing_model_states_render():
+    r = HudRenderer(HUD, COLORS)
+    r.render(_letter_snap(letter_candidate=None, letter_locked="L", letter_progress=0.0))
+    r.render(_snap(letters_enabled=False))              # "NO ASL MODEL" badge
+    r.render(_letter_snap(letter_top=()))               # nothing guessed yet
+
+
+def test_letter_event_label():
+    ev = GestureEvent(GestureKind.LETTER, Pose.FIST, 1.0, label="S", confidence=0.87)
+    assert describe_event(ev) == "LETTER S (87%)"

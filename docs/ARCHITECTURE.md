@@ -63,8 +63,31 @@ DEEP STANDBY must *guarantee* no keystrokes. Three independent barriers enforce 
 | 14 | A `-headless` OpenCV build has no GUI | `namedWindow` raises and the daemon would crash | `HudWindow.open()` catches `cv2.error`, logs a hint and hides the HUD. Typing keeps working |
 | 15 | Hershey glyph advance grows with stroke thickness | A thick black "outline" drifts away from the text | The overlay uses a same-thickness 1 px drop shadow instead |
 | 16 | A state transition resets the classifier in the middle of a frame | The HUD would show "no hand" right after waking | The pose is captured before `sm.step()` runs |
+| 17 | The 0.75 s post-wake grace period dropped *all* typing events | A letter committed in that window would be swallowed **and** locked, so it could not be retyped | Grace now applies to swipes only. A letter needs a 0.4 s dwell, which can only start after the transition |
+| 18 | Relaxing into a fist between thumb-downs ("Off, Off, Off") | The fist would be typed as A or S | Letters pause for 1.5 s after any THUMB_DOWN frame (`AslConfig.cooldown_s`) |
+| 19 | Dataset photos are unrelated to each other | Video-mode tracking reuses the previous hand's region, giving wrong landmarks | Extraction runs MediaPipe in static-image mode (`static_image_mode=True` / Tasks `IMAGE`) |
+| 20 | Dataset photos are 200×200, not 640×360 | Pixel-space conversion with the wrong size skews the features | `HandTracker.process` uses each image's real size. A parity test checks a 200×200 photo against a 640×360 frame |
+| 21 | Near-duplicate frames from a single signer | Random K-fold reports ~99% while a real webcam gets far less | `GroupKFold` by signer, and a loud warning when only one signer exists |
 
-## 4. Power model
+## 4. Static ASL letter classifier
+
+```
+HandObservation ─► features.asl_features ─► RandomForest.predict_proba ─► EMA ─► LetterDetector ─► LETTER event
+ (wrist-origin,     (63 coords + 10 tip-     (≤ 15 calls/s, n_jobs=1,     (α=0.5)  (0.4 s dwell,
+  palm-scaled)       tip distances; left      only in ACTIVE, hand still,             0.2 s release
+                     hand mirrored to right)  no control pose)                        lockout)
+```
+
+- **One feature function.** `features.py` is imported by both `tools/extract_landmarks.py` and the runtime. The feature version and options (`mirror_left`, `use_z`) are stored in the model bundle. `AslClassifier` refuses a bundle whose version, classes or feature count don't match.
+- **Threading.** The model is loaded on the main thread at start-up and only called on the inference thread, like everything else in the recognition path, so it needs no locks. `n_jobs` is forced to 1 because a one-sample prediction gains nothing from a thread pool.
+- **Cost.** On synthetic 73-feature data, one `predict_proba` call on a 150-tree, depth-20 forest took about 8 ms. The 15 Hz cap and the "hand must be still" rule keep the average CPU cost well below that per frame.
+- **Rejection.** There is no catch-all "not a letter" class. Instead, three guards keep non-letters from typing:
+  1. the calibrated confidence threshold, applied to EMA-smoothed probabilities;
+  2. rule-based suppression of the control poses;
+  3. the stillness requirement.
+- **Safety.** joblib/pickle can execute code on load. The app only loads the configured local path and never downloads models.
+
+## 5. Power model
 
 | State | Camera reads/s | NN inferences/s (static scene) | NN inferences/s (motion) |
 |---|---|---|---|

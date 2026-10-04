@@ -81,6 +81,8 @@ models/
 *.task
 *.tflite
 recordings/
+# ASL datasets and extracted features (large; re-creatable)
+data/
 *.mp4
 *.avi
 

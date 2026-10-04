@@ -5,7 +5,7 @@ import time
 import numpy as np
 
 from camera import CaptureWorker, Frame, LatestFrameSlot
-from config import BACKSPACE, SPACE
+from config import BACKSPACE, ENTER, SPACE
 from gestures import Direction, GestureEvent, GestureKind, Pose
 from keyboard_output import KeyboardOutput, KeyMapper
 from motion_gate import MotionGate
@@ -56,29 +56,25 @@ def _swipe(pose, direction):
     return GestureEvent(GestureKind.SWIPE, Pose(pose), 0.0, Direction(direction))
 
 
-def test_mapper_base_layer_and_clutch(cfg):
+def test_mapper_edit_swipes_only_open_palm(cfg):
     m = KeyMapper(cfg.keyboard)
-    assert m.map(_swipe("POINT", "RIGHT")) == "t"
     assert m.map(_swipe("OPEN_PALM", "RIGHT")) == SPACE
     assert m.map(_swipe("OPEN_PALM", "LEFT")) == BACKSPACE
-    assert m.map(_swipe("FIST", "LEFT")) is None
-    assert m.map(_swipe("UNKNOWN", "LEFT")) is None
+    assert m.map(_swipe("OPEN_PALM", "DOWN")) == ENTER
+    assert m.map(_swipe("OPEN_PALM", "UP")) is None
+    for pose in ("POINT", "PEACE", "THREE", "FOUR", "PINCH", "FIST", "UNKNOWN"):
+        for d in ("LEFT", "RIGHT", "UP", "DOWN"):
+            assert m.map(_swipe(pose, d)) is None          # old letter matrix is gone
 
 
-def test_mapper_alt_layer_is_one_shot(cfg):
+def test_mapper_letters(cfg):
+    import dataclasses
     m = KeyMapper(cfg.keyboard)
-    assert m.map(_swipe("OPEN_PALM", "UP")) is None and m.alt_layer
-    assert m.map(_swipe("POINT", "RIGHT")) == "k"
-    assert not m.alt_layer
-    assert m.map(_swipe("POINT", "RIGHT")) == "t"
-
-
-def test_alphabet_coverage(cfg):
-    letters = set()
-    for layout in (cfg.keyboard.base_layout, cfg.keyboard.alt_layout):
-        for keys in layout.values():
-            letters |= {k for k in keys.values() if len(k) == 1 and k.isalpha()}
-    assert letters == set("abcdefghijklmnopqrstuvwxyz")
+    letter = GestureEvent(GestureKind.LETTER, Pose.FIST, 0.0, label="A", confidence=0.9)
+    assert m.map(letter) == "a"
+    assert KeyMapper(dataclasses.replace(cfg.keyboard, letter_case="upper")).map(letter) == "A"
+    assert m.map(GestureEvent(GestureKind.LETTER, Pose.FIST, 0.0, label="NOTHING")) is None
+    assert m.map(GestureEvent(GestureKind.HOLD, Pose.OPEN_PALM, 0.0)) is None
 
 
 class FakeController:

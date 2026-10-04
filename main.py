@@ -39,6 +39,23 @@ from ui import Notifier, TrayUI
 log = logging.getLogger("gvk")
 
 
+def load_asl_model(path: str):
+    """Load the trained ASL Random Forest; without one the app still runs
+    (wake / standby / editing swipes) but cannot type letters."""
+    try:
+        from asl_classifier import AslClassifier
+        return AslClassifier.load(path)
+    except FileNotFoundError:
+        log.warning("No ASL model at %s - letters disabled. Train one with "
+                    "tools/extract_landmarks.py + tools/train_asl.py (see README).", path)
+    except ImportError as exc:
+        log.warning("scikit-learn/joblib not installed (%s) - letters disabled. "
+                    "Run: pip install -r requirements.txt", exc)
+    except Exception:
+        log.exception("Could not load ASL model %s - letters disabled", path)
+    return None
+
+
 class GestureKeyboardApp:
     JOIN_TIMEOUT_S = 3.0
     MODEL_LOAD_TIMEOUT_S = 120.0     # first run may download the model
@@ -51,7 +68,9 @@ class GestureKeyboardApp:
 
         self.slot = LatestFrameSlot()
         self.sm = StateMachine(cfg.state, cfg.power, now=time.monotonic())
-        self.classifier = GestureClassifier(cfg.gesture, cfg.pose)
+        self.asl_model = load_asl_model(cfg.asl.model_path)
+        self.classifier = GestureClassifier(cfg.gesture, cfg.pose,
+                                            letter_model=self.asl_model, asl_cfg=cfg.asl)
         self.classifier.configure(self.sm.state, self.sm.target_fps)
         self.gate = MotionGate(cfg.motion)
         self.mapper = KeyMapper(cfg.keyboard)
@@ -233,6 +252,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-toasts", action="store_true", help="disable desktop notifications")
     p.add_argument("--hud", action=argparse.BooleanOptionalAction, default=None,
                    help="show/hide the live telemetry window (default: config.ENABLE_HUD)")
+    p.add_argument("--asl-model", default=DEFAULT_CONFIG.asl.model_path,
+                   help="trained ASL model bundle (default models/asl_rf.pkl)")
     p.add_argument("--log-level", default=DEFAULT_CONFIG.log_level)
     return p.parse_args(argv)
 
@@ -248,6 +269,7 @@ def build_config(args: argparse.Namespace) -> Config:
                                   if args.start_active else c.state.initial_state),
         ui=dataclasses.replace(c.ui, toasts_enabled=not args.no_toasts),
         hud=dataclasses.replace(c.hud, enabled=c.hud.enabled if args.hud is None else args.hud),
+        asl=dataclasses.replace(c.asl, model_path=args.asl_model),
         log_level=args.log_level,
     )
 

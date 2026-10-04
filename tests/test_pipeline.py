@@ -1,6 +1,8 @@
 """End-to-end: scripted hand observations through the real app wiring."""
 import dataclasses
+import time
 
+import joblib
 import numpy as np
 
 from camera import Frame
@@ -23,8 +25,10 @@ class ScriptedTracker:
         pass
 
 
-def make_app():
-    cfg = build_config(parse_args(["--no-tray", "--no-toasts", "--no-hud"]))
+def make_app(asl_path=None):
+    args = ["--no-tray", "--no-toasts", "--no-hud",
+            "--asl-model", str(asl_path or "does/not/exist.pkl")]
+    cfg = build_config(parse_args(args))
     cfg = dataclasses.replace(cfg, motion=dataclasses.replace(cfg.motion, enabled_states=()))
     app = GestureKeyboardApp(cfg, use_tray=False)
     fc = FakeController()
@@ -51,8 +55,18 @@ class Driver:
             self.app.inference.process_frame(Frame(self.img, self.t, self.seq), self.tracker)
 
 
-def test_wake_type_and_standby_cycle():
-    app, fc = make_app()
+def _wait_for(fc, n, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while len(fc.typed) < n and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return fc.typed
+
+
+def test_wake_type_and_standby_cycle(tmp_path, asl_bundle):
+    model = tmp_path / "asl.pkl"
+    joblib.dump(asl_bundle, model)
+    app, fc = make_app(model)
+    assert app.classifier.letters is not None
     app.keyboard.start()
     try:
         d = Driver(app)
@@ -60,25 +74,43 @@ def test_wake_type_and_standby_cycle():
         d.run("OPEN_PALM", 2.4)                         # wake gesture @ 10 FPS
         assert app.sm.state == SystemState.ACTIVE and app.keyboard.enabled
 
-        d.run("POINT", 1.0)                             # past grace period
-        d.run("POINT", 0.25, dx=2.0)                    # swipe RIGHT -> 't'
-        d.run("POINT", 0.4)
-        assert fc.event.wait(1.0)
-        assert fc.typed == ["t"]
+        d.run("POINT", 0.6)                             # static letter 'D' held 0.4 s
+        assert _wait_for(fc, 1) == ["d"]
+        d.run("OPEN_PALM", 0.3)
+        d.run("OPEN_PALM", 0.25, dx=2.0)                # palm swipe RIGHT -> space
+        d.run("OPEN_PALM", 0.3)
+        typed = _wait_for(fc, 2)
+        assert len(typed) == 2 and "space" in typed[1].lower()
 
-        for _ in range(3):                              # "Off, Off, Off"
+        for _ in range(3):                              # "Off, Off, Off" (fists not typed)
             d.run("THUMB_DOWN", 0.4)
             d.run("FIST", 0.4)
         assert app.sm.state == SystemState.DEEP_STANDBY
         assert not app.keyboard.enabled
 
-        d.run("POINT", 0.3, dx=2.0)                     # no typing in standby
-        assert fc.typed == ["t"]
+        d.run("POINT", 2.0)                             # no typing in standby
+        assert len(fc.typed) == 2
 
         for _ in range(3):                              # "On, On, On" @ 1 FPS
             d.run("THUMB_UP", 1.0)
             d.run(None, 1.0)
         assert app.sm.state == SystemState.IDLE
+    finally:
+        app.keyboard.stop()
+
+
+def test_old_swipe_letter_matrix_no_longer_types():
+    app, fc = make_app()
+    assert app.classifier.letters is None               # no model -> no letters
+    app.keyboard.start()
+    try:
+        d = Driver(app)
+        d.run("OPEN_PALM", 2.4)
+        d.run("POINT", 1.0)
+        d.run("POINT", 0.25, dx=2.0)                    # used to type 't'
+        d.run("POINT", 0.5)
+        time.sleep(0.1)
+        assert fc.typed == []
     finally:
         app.keyboard.stop()
 

@@ -80,14 +80,57 @@ HANDS = {
 }
 
 
-def observation(pose: str | None, t: float, wrist=(320.0, 200.0), palm=80.0) -> HandObservation:
-    """A HandObservation as the tracker would emit it."""
+def observation(pose: str | None, t: float, wrist=(320.0, 200.0), palm=80.0,
+                jitter: float = 0.0, rng=None, handedness: str = "Right") -> HandObservation:
+    """A HandObservation as the tracker would emit it.
+
+    ``jitter`` adds per-landmark noise in palm lengths (to mimic MediaPipe)."""
     if pose is None:
         return HandObservation(t)
-    px = HANDS[pose] * palm
+    shape = HANDS[pose].copy()
+    if jitter:
+        shape = shape + (rng or np.random.default_rng()).normal(0, jitter, shape.shape)
+    px = (shape * palm).astype(np.float32)
     px[:, :2] += np.asarray(wrist, dtype=np.float32)
     scaled, scale = normalize_landmarks(px)
-    return HandObservation(t, scaled, px[0, :2].copy(), scale, "Right")
+    return HandObservation(t, scaled, px[0, :2].copy(), scale, handedness)
+
+
+# Synthetic "ASL" vocabulary for tests: each synthetic hand shape stands in
+# for a letter. (Only the plumbing is under test, not real ASL accuracy.)
+SYNTH_LETTERS = {"FIST": "S", "POINT": "D", "PEACE": "V", "THREE": "W",
+                 "FOUR": "B", "PINCH": "F", "THUMB_UP": "A"}
+
+
+def synthetic_dataset(n_per_class: int = 60, seed: int = 0, jitter: float = 0.04):
+    from features import asl_features
+    rng = np.random.default_rng(seed)
+    X, y, g = [], [], []
+    for pose, letter in SYNTH_LETTERS.items():
+        for i in range(n_per_class):
+            obs = observation(pose, 0.0, jitter=jitter, rng=rng)
+            X.append(asl_features(obs))
+            y.append(letter)
+            g.append("signer1" if i % 2 else "signer2")
+    return np.array(X, np.float32), np.array(y), np.array(g)
+
+
+@pytest.fixture(scope="session")
+def asl_bundle():
+    from sklearn.ensemble import RandomForestClassifier
+
+    from features import DEFAULT_OPTIONS, FEATURE_VERSION
+    X, y, _ = synthetic_dataset()
+    model = RandomForestClassifier(n_estimators=25, max_depth=8, random_state=0).fit(X, y)
+    return {"model": model, "classes": [str(c) for c in model.classes_], "threshold": 0.5,
+            "feature_version": FEATURE_VERSION, "feature_options": dict(DEFAULT_OPTIONS),
+            "sklearn_version": "test"}
+
+
+@pytest.fixture
+def asl_model(asl_bundle):
+    from asl_classifier import AslClassifier
+    return AslClassifier(asl_bundle)
 
 
 @pytest.fixture

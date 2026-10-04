@@ -110,14 +110,14 @@ class _Backend:
 class SolutionsBackend(_Backend):
     name = "solutions"
 
-    def __init__(self, cfg: TrackerConfig) -> None:
+    def __init__(self, cfg: TrackerConfig, static_images: bool = False) -> None:
         import mediapipe as mp
 
         hands_mod = getattr(getattr(mp, "solutions", None), "hands", None)
         if hands_mod is None:
             raise ImportError("mediapipe.solutions.hands not available")
         self._hands = hands_mod.Hands(
-            static_image_mode=False,
+            static_image_mode=static_images,       # True for unrelated dataset photos
             max_num_hands=cfg.max_num_hands,
             model_complexity=cfg.model_complexity,     # 0 = Lite
             min_detection_confidence=cfg.min_detection_confidence,
@@ -142,7 +142,7 @@ class SolutionsBackend(_Backend):
 class TasksBackend(_Backend):
     name = "tasks"
 
-    def __init__(self, cfg: TrackerConfig) -> None:
+    def __init__(self, cfg: TrackerConfig, static_images: bool = False) -> None:
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions, vision
 
@@ -157,9 +157,10 @@ class TasksBackend(_Backend):
             tmp.replace(model_path)
 
         self._mp = mp
+        self._static = static_images
         opts = vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path)),
-            running_mode=vision.RunningMode.VIDEO,
+            running_mode=vision.RunningMode.IMAGE if static_images else vision.RunningMode.VIDEO,
             num_hands=cfg.max_num_hands,
             min_hand_detection_confidence=cfg.min_detection_confidence,
             min_hand_presence_confidence=cfg.min_detection_confidence,
@@ -173,7 +174,10 @@ class TasksBackend(_Backend):
         self._last_ts_ms = ts_ms
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB,
                                data=np.ascontiguousarray(rgb))
-        res = self._landmarker.detect_for_video(image, ts_ms)
+        if self._static:
+            res = self._landmarker.detect(image)
+        else:
+            res = self._landmarker.detect_for_video(image, ts_ms)
         if not res.hand_landmarks:
             return None, None
         arr = np.array([[p.x, p.y, p.z] for p in res.hand_landmarks[0]], dtype=np.float32)
@@ -184,13 +188,13 @@ class TasksBackend(_Backend):
         self._landmarker.close()
 
 
-def create_backend(cfg: TrackerConfig) -> _Backend:
+def create_backend(cfg: TrackerConfig, static_images: bool = False) -> _Backend:
     order = {"solutions": [SolutionsBackend], "tasks": [TasksBackend]}.get(
         cfg.backend, [SolutionsBackend, TasksBackend])
     errors = []
     for cls in order:
         try:
-            backend = cls(cfg)
+            backend = cls(cfg, static_images=static_images)
             log.info("MediaPipe backend: %s", backend.name)
             return backend
         except Exception as exc:  # ImportError, AttributeError, download errors
@@ -202,9 +206,9 @@ class HandTracker:
     """Frame -> ``HandObservation``. Owned by the inference thread."""
 
     def __init__(self, cfg: TrackerConfig, width: int, height: int,
-                 backend: Optional[_Backend] = None) -> None:
+                 backend: Optional[_Backend] = None, static_images: bool = False) -> None:
         self._w, self._h = width, height
-        self._backend = backend or create_backend(cfg)
+        self._backend = backend or create_backend(cfg, static_images=static_images)
 
     def process(self, bgr: np.ndarray, timestamp: float) -> HandObservation:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -212,7 +216,9 @@ class HandTracker:
         raw, label = self._backend.infer(rgb, timestamp)
         if raw is None:
             return HandObservation(timestamp)
-        return HandObservation.from_raw(timestamp, raw, self._w, self._h, label)
+        # Use the real image size (dataset photos are not 640x360).
+        h, w = bgr.shape[:2]
+        return HandObservation.from_raw(timestamp, raw, w, h, label)
 
     def close(self) -> None:
         try:
