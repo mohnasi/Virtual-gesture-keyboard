@@ -157,6 +157,23 @@ def landmarks_to_pixels(hand: HandObservation) -> np.ndarray:
     return hand.landmarks[:, :2] * hand.palm_px + hand.wrist_px
 
 
+def draw_hand_skeleton(img: np.ndarray, pts: np.ndarray, color, k: float = 1.0) -> None:
+    """Draw the 21-joint hand skeleton (pixel coords) - shared by the HUD and
+    tools/record_samples.py."""
+    def px(v: float) -> int:
+        return max(1, int(round(v * k)))
+
+    p = np.asarray(pts, dtype=np.float32).astype(np.int32)
+    for a, b in HAND_CONNECTIONS:
+        cv2.line(img, tuple(p[a]), tuple(p[b]), _WHITE, px(2), cv2.LINE_AA)
+    for i, pt in enumerate(p):
+        if i in FINGERTIPS:
+            cv2.circle(img, tuple(pt), px(5), _WHITE, -1, cv2.LINE_AA)
+            cv2.circle(img, tuple(pt), px(5), color, px(2), cv2.LINE_AA)
+        else:
+            cv2.circle(img, tuple(pt), px(3), color, -1, cv2.LINE_AA)
+
+
 class HudRenderer:
     def __init__(self, cfg: HudConfig, colors_rgb: Dict[SystemState, Tuple[int, int, int]],
                  frame_size: Tuple[int, int] = (640, 360)) -> None:
@@ -230,15 +247,7 @@ class HudRenderer:
             cv2.line(img, tuple(pts[i - 1]), tuple(pts[i]), _TRAIL, t, cv2.LINE_AA)
 
     def _draw_skeleton(self, img, pts, color) -> None:
-        p = pts.astype(np.int32)
-        for a, b in HAND_CONNECTIONS:
-            cv2.line(img, tuple(p[a]), tuple(p[b]), _WHITE, self._px(2), cv2.LINE_AA)
-        for i, pt in enumerate(p):
-            if i in FINGERTIPS:
-                cv2.circle(img, tuple(pt), self._px(5), _WHITE, -1, cv2.LINE_AA)
-                cv2.circle(img, tuple(pt), self._px(5), color, self._px(2), cv2.LINE_AA)
-            else:
-                cv2.circle(img, tuple(pt), self._px(3), color, -1, cv2.LINE_AA)
+        draw_hand_skeleton(img, pts, color, self._k)
 
     def _draw_swipe_arrow(self, img, snap, color) -> None:
         ev = snap.last_event

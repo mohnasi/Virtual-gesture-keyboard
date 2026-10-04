@@ -162,7 +162,34 @@ Spread your hand open and make one smooth sweep of about 1–2 palm-lengths:
 
 ## Training the ASL model
 
-The model isn't shipped in the repo. You build it once with two scripts. Both use the same MediaPipe tracker and the same `features.py` as the live app, so training and runtime features always match.
+The model isn't shipped in the repo. You build it from your own hand, from public datasets, or from both. Every route uses the same MediaPipe tracker and the same `features.py` as the live app, so training and runtime features always match.
+
+### Quick start: calibrate on your own hand (recommended)
+
+```powershell
+python tools\record_samples.py          # ~5 minutes, letters A-Z
+python tools\train_asl.py data\features\user_samples.npz
+python main.py
+```
+
+<img src="docs/record_samples_preview.png" alt="Recorder: countdown with J/Z note, capture progress, no-hand alert" width="100%"/>
+
+For each letter the recorder works like this:
+
+1. It shows **"Pose for letter: X"** and counts down **3 s**.
+2. It records **100 frames** of the held handshape, keeping every second valid frame for natural variety. A skeleton overlay and a progress bar are shown throughout.
+3. Frames with no hand are skipped, with a red **"No hand detected"** alert.
+4. For **J** and **Z** it reminds you to *hold the static pose, not draw in the air*.
+
+Either hand works, because left hands are mirrored to right hands by the same `features.asl_features` used at runtime.
+
+- **Keys:** **R** redo the letter, **B** back one letter, **S** skip it, **Q / Esc** save and quit. A letter interrupted part-way is discarded.
+- **Fix weak letters later:** `python tools\record_samples.py --letters MNST --append` re-records just those letters. The rest of the file is kept.
+- **Record and train in one go:** add `--train`.
+
+`train_asl.py` validates personal data by holding out whole **time blocks** of each letter's recording, so near-identical neighbouring frames never land on both sides of a split. Treat that score as an estimate for *you*, not for other people. The confidence threshold never drops below `--min-threshold` (0.5), so relaxed or in-between hand shapes aren't typed just because your recordings were very clean.
+
+### Adding public datasets (optional)
 
 **1. Download data** (needs a free Kaggle account: kaggle.com → Settings → API → *Create New Token*, then save `kaggle.json` to `%USERPROFILE%\.kaggle\`):
 
@@ -279,9 +306,10 @@ gesture-virtual-keyboard/
 ├── hud.py               # live telemetry HUD (renderer + draggable window)
 ├── pipeline.py          # InferenceWorker: gate → track → classify → act
 ├── tools/
+│   ├── record_samples.py     # personal webcam calibration A-Z -> user_samples.npz
 │   ├── extract_landmarks.py  # dataset images -> landmark features (.npz)
 │   └── train_asl.py          # signer-grouped CV, threshold calibration, .pkl
-├── tests/               # 114 hardware-free tests (synthetic hands, fake camera/GUI)
+├── tests/               # 129 hardware-free tests (synthetic hands, fake camera/GUI)
 └── docs/ARCHITECTURE.md # design review & threading model
 ```
 
@@ -291,7 +319,7 @@ The test suite needs **no webcam, no MediaPipe and no keyboard backend**. It dri
 
 ```bash
 pip install -r requirements-dev.txt
-pytest          # 114 tests
+pytest          # 129 tests
 ruff check .
 ```
 
@@ -309,7 +337,7 @@ CI runs both on Python 3.10, 3.11, 3.12 and 3.13.
 - [ ] Per-user calibration wizard (records your own pose templates and swipe speed)
 - [x] Live telemetry HUD (skeleton, state, pose, gesture)
 - [x] Static ASL fingerspelling (Random Forest, dwell-based commit)
-- [ ] Record-your-own-hand tool for per-user ASL training data
+- [x] Record-your-own-hand tool for per-user ASL training data
 - [ ] Motion-based J and Z (trajectory detector on top of the letter handshape)
 - [ ] Word prediction / auto-complete to cut the strokes needed per word
 - [ ] Learned temporal classifier (1D-CNN / GRU over the landmark buffer) as a drop-in `Detector`

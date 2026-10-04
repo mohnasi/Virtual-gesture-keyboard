@@ -85,6 +85,8 @@ HandObservation ─► features.asl_features ─► RandomForest.predict_proba �
   1. the calibrated confidence threshold, applied to EMA-smoothed probabilities;
   2. rule-based suppression of the control poses;
   3. the stillness requirement.
+- **Personal calibration.** `tools/record_samples.py` uses the daemon's own `open_capture` and `prepare_frame` (640×360, mirrored), `HandTracker` and `asl_features`. It runs single-threaded, because a recording tool has no power budget. The camera is released in a `finally` block. Each sample stores a `segment` (which fifth of that letter's recording it came from). With a single person, `train_asl.py` runs `GroupKFold` over those time blocks instead of a leaky random split.
+- **Threshold floor.** Clean single-person data often calibrates to a threshold near 0, which would type *something* for any hand. `--min-threshold` (default 0.5) puts a floor under it.
 - **Safety.** joblib/pickle can execute code on load. The app only loads the configured local path and never downloads models.
 
 ## 5. Power model

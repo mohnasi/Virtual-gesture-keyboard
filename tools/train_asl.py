@@ -40,7 +40,14 @@ from features import FEATURE_VERSION  # noqa: E402
 
 
 def load_features(paths: Iterable[Path]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    Xs, ys, gs, options = [], [], [], None
+    X, y, g, _, options = load_features_ex(paths)
+    return X, y, g, options
+
+
+def load_features_ex(paths: Iterable[Path]):
+    """Like ``load_features`` but also returns ``segment`` (recording time
+    block from record_samples.py) or ``None`` if any file lacks it."""
+    Xs, ys, gs, segs, options = [], [], [], [], None
     for p in paths:
         with np.load(p, allow_pickle=False) as d:
             version = int(d["feature_version"])
@@ -54,9 +61,11 @@ def load_features(paths: Iterable[Path]) -> Tuple[np.ndarray, np.ndarray, np.nda
             Xs.append(d["X"])
             ys.append(d["y"])
             gs.append(d["group"])
+            segs.append(d["segment"] if "segment" in d.files else None)
     if not Xs:
         raise SystemExit("no feature files given")
-    return np.concatenate(Xs), np.concatenate(ys), np.concatenate(gs), options
+    seg = None if any(s is None for s in segs) else np.concatenate(segs)
+    return np.concatenate(Xs), np.concatenate(ys), np.concatenate(gs), seg, options
 
 
 def choose_threshold(proba: np.ndarray, y_idx: np.ndarray,
@@ -104,6 +113,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--min-leaf", type=int, default=2)
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--target-precision", type=float, default=0.95)
+    p.add_argument("--min-threshold", type=float, default=0.5,
+                   help="never type below this confidence, even if validation is perfect "
+                        "(guards against relaxed / in-between hands being typed)")
     p.add_argument("--test", type=Path, nargs="*", default=[],
                    help="extra .npz evaluated only (e.g. a different dataset)")
     p.add_argument("--seed", type=int, default=42)
@@ -117,7 +129,13 @@ def main(argv=None) -> int:
     from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_predict
 
     args = parse_args(argv)
-    X, y, groups, options = load_features(args.features)
+    missing_files = [p for p in args.features if not p.exists()]
+    if missing_files:
+        print(f"error: not found: {', '.join(map(str, missing_files))}", file=sys.stderr)
+        if any(p.name == "user_samples.npz" for p in missing_files):
+            print("record your hand first:  python tools/record_samples.py", file=sys.stderr)
+        return 2
+    X, y, groups, segments, options = load_features_ex(args.features)
     classes = np.unique(y)
     n_groups = len(np.unique(groups))
     print(f"{len(y)} samples, {len(classes)} classes, {n_groups} signer group(s), "
@@ -127,10 +145,22 @@ def main(argv=None) -> int:
              f"samples: {len(y)}  classes: {len(classes)}  groups: {n_groups}"]
 
     min_class = min(Counter(y).values())
+    missing_letters = sorted(set("ABCDEFGHIJKLMNOPQRSTUVWXYZ") - set(classes.tolist()))
+    if missing_letters:
+        print(f"note: no samples for {''.join(missing_letters)} - those letters can't be typed")
+    n_segments = len(np.unique(segments)) if segments is not None else 0
     if n_groups >= 2:
         cv = GroupKFold(n_splits=min(args.folds, n_groups))
         scheme = f"GroupKFold({cv.n_splits}) by signer - unseen-signer estimate"
         cv_kwargs = {"groups": groups}
+    elif n_segments >= 2:
+        # One person (record_samples.py): hold out whole time blocks of each
+        # letter's recording, so neighbouring near-identical frames never sit
+        # on both sides of the split.
+        cv = GroupKFold(n_splits=min(args.folds, n_segments))
+        scheme = (f"GroupKFold({cv.n_splits}) by recording time block - estimate for "
+                  "THIS person only (not for other people)")
+        cv_kwargs = {"groups": segments}
     else:
         cv = StratifiedKFold(n_splits=max(2, min(args.folds, min_class)), shuffle=True,
                              random_state=args.seed)
@@ -146,6 +176,17 @@ def main(argv=None) -> int:
     pred = classes[proba.argmax(axis=1)]
     acc = float(accuracy_score(y, pred))
     thr, prec, coverage = choose_threshold(proba, y_idx, args.target_precision)
+    if thr < args.min_threshold:
+        # Clean, well-separated data (typical for one person) calibrates to a
+        # near-zero threshold, which would type *something* for any hand
+        # shape. Keep a floor and report what it costs on validation data.
+        thr = args.min_threshold
+        conf = proba.max(axis=1)
+        mask = conf >= thr
+        correct = proba.argmax(axis=1) == y_idx
+        prec = float(correct[mask].mean()) if mask.any() else float("nan")
+        coverage = float(mask.mean())
+        print(f"threshold raised to the --min-threshold floor {thr:.2f}")
     print(f"cross-validated accuracy {acc:.1%}; threshold {thr:.2f} -> "
           f"{prec:.1%} precision on {coverage:.0%} of frames")
     lines += [f"validation: {scheme}", f"accuracy (top-1, no threshold): {acc:.4f}",
@@ -195,7 +236,21 @@ def main(argv=None) -> int:
     report_path.write_text("\n".join(lines), encoding="utf-8")
     size_mb = args.out.stat().st_size / 1e6
     print(f"wrote {args.out} ({size_mb:.1f} MB) and {report_path.name}")
+    print_next_steps(args.out)
     return 0
+
+
+def print_next_steps(model_path: Path) -> None:
+    default = (ROOT / "models" / "asl_rf.pkl").resolve()
+    run = "python main.py" if Path(model_path).resolve() == default \
+        else f"python main.py --asl-model {model_path}"
+    print("\nNext steps (run from the project folder):")
+    print(f"  1. Type with ASL:      {run}")
+    print("     Wake with an open palm held 2 s, then hold each letter still for 0.4 s.")
+    print("  2. Improve weak letters (see the confusions in the .txt report):")
+    print("       python tools/record_samples.py --letters MNST --append")
+    print("       python tools/train_asl.py data/features/user_samples.npz")
+    print("  3. Calibrate from scratch:  python tools/record_samples.py")
 
 
 if __name__ == "__main__":

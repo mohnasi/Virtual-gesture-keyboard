@@ -89,6 +89,46 @@ def _resolve_backend(name: str) -> int:
     return table.get(name, cv2.CAP_ANY)
 
 
+def open_capture(cfg: CameraConfig):
+    """Open and configure the webcam (shared by the daemon and the tools).
+
+    Returns an opened ``cv2.VideoCapture`` or ``None``. The caller owns it and
+    must ``release()`` it on the same thread."""
+    import cv2
+
+    try:
+        cap = cv2.VideoCapture(cfg.index, _resolve_backend(cfg.backend))
+    except Exception:
+        log.exception("cv2.VideoCapture raised")
+        return None
+    if not cap.isOpened():
+        cap.release()
+        return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
+    cap.set(cv2.CAP_PROP_FPS, cfg.native_fps)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # minimise driver-side latency
+    log.info(
+        "Camera %d opened at %dx%d (requested %dx%d)",
+        cfg.index,
+        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        cfg.width, cfg.height,
+    )
+    return cap
+
+
+def prepare_frame(image: np.ndarray, cfg: CameraConfig) -> np.ndarray:
+    """Lock the feed to the configured size (640x360) and mirror it."""
+    import cv2
+
+    if image.shape[:2] != (cfg.height, cfg.width):
+        image = cv2.resize(image, (cfg.width, cfg.height), interpolation=cv2.INTER_AREA)
+    if cfg.mirror:
+        image = cv2.flip(image, 1)
+    return image
+
+
 class CaptureWorker(threading.Thread):
     """Owns the webcam for its entire lifetime and publishes frames."""
 
@@ -146,33 +186,9 @@ class CaptureWorker(threading.Thread):
             self._slot.close()
 
     def _open(self):
-        import cv2
-
-        try:
-            cap = cv2.VideoCapture(self._cfg.index, _resolve_backend(self._cfg.backend))
-        except Exception:
-            log.exception("cv2.VideoCapture raised")
-            return None
-        if not cap.isOpened():
-            cap.release()
-            return None
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._cfg.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._cfg.height)
-        cap.set(cv2.CAP_PROP_FPS, self._cfg.native_fps)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # minimise driver-side latency
-        log.info(
-            "Camera %d opened at %dx%d (requested %dx%d)",
-            self._cfg.index,
-            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            self._cfg.width, self._cfg.height,
-        )
-        return cap
+        return open_capture(self._cfg)
 
     def _capture_loop(self, cap) -> None:
-        import cv2
-
-        target = (self._cfg.height, self._cfg.width)
         failures = 0
         next_due = time.monotonic()
         while not self._stop_event.is_set():
@@ -194,11 +210,7 @@ class CaptureWorker(threading.Thread):
                 continue
             failures = 0
 
-            if image.shape[:2] != target:   # lock the feed to 640x360
-                image = cv2.resize(image, (target[1], target[0]),
-                                   interpolation=cv2.INTER_AREA)
-            if self._cfg.mirror:
-                image = cv2.flip(image, 1)
+            image = prepare_frame(image, self._cfg)   # 640x360, selfie-mirrored
 
             self._seq += 1
             self.frames_captured += 1
