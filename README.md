@@ -33,55 +33,7 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
 
 ## How it works
 
-```
-                        ┌──────────────────────────── CaptureWorker thread ───┐
-   Webcam ──► cv2.VideoCapture (DSHOW) ──► lock 640×360 ──► mirror ──► LatestFrameSlot
-              rate = 30 / 10 / 1 FPS (follows the state machine)    (1-slot mailbox,
-                        └───────────────────────────────────────── overwrite-on-write)
-                                                                         │
- ┌────────────────────────────── InferenceWorker thread ────────────────▼───────────┐
- │                                                                                  │
- │  IDLE / DEEP STANDBY only:                                                       │
- │  ┌───────────────────────────┐  static   ┌───────────────────────────┐           │
- │  │ Motion gate               │──scene───►│ skip ML, sleep until next │           │
- │  │ gray 160×90 · cv2.absdiff │           │ frame (≈0% NN compute)    │           │
- │  │ + 3 s hold-open latch     │           └───────────────────────────┘           │
- │  └────────────┬──────────────┘                                                   │
- │        motion │ (ACTIVE: every frame)                                            │
- │               ▼                                                                  │
- │  MediaPipe Hands · Lite model (model_complexity=0) → 21 × (x, y, z)              │
- │               ▼                                                                  │
- │  Normalise: pixel space → wrist (node 0) = origin → ÷ ‖node 9 − node 0‖          │
- │               ▼                                                                  │
- │  TemporalBuffer deque(maxlen=45)  ≈ 1.5 s @ 30 FPS                               │
- │               ▼                                                                  │
- │  GestureClassifier ── Pose classifier (FIST, POINT, PEACE, … THUMB_UP/DOWN)      │
- │                    ├─ SwipeDetector       (wrist trajectory, palm-length units)  │
- │                    ├─ StaticHoldDetector  (wake: open palm, steady 2 s)          │
- │                    ├─ RepetitionDetector  ("Off ×3" / "On ×3")                   │
- │                    └─ LetterDetector      (Random Forest → static ASL A–Z,       │
- │                                            0.4 s dwell, 0.2 s release lockout)   │
- │               ▼                                                                  │
- │  ┌─────────────────────────── 3-tier State Machine ───────────────────────────┐  │
- │  │                                                                            │  │
- │  │   ┌──────────┐  open palm held 2 s   ┌──────────┐                          │  │
- │  │   │   IDLE   │ ────────────────────► │  ACTIVE  │──► KeyMapper ──┐         │  │
- │  │   │  10 FPS  │ ◄──────────────────── │  30 FPS  │                │         │  │
- │  │   │  yellow  │    no hand for 2 s    │  green   │                │         │  │
- │  │   └──────────┘                       └────┬─────┘                │         │  │
- │  │        ▲                                  │ "Off, Off, Off"      │         │  │
- │  │        │ "On, On, On"   ┌──────────────┐  │ thumb down ×3        │         │  │
- │  │        └─────────────── │ DEEP STANDBY │◄─┘                      │         │  │
- │  │          thumb up ×3    │  1 FPS · red │                         │         │  │
- │  │                         └──────────────┘                         │         │  │
- │  └──────────────────────────────────────────────────────────────────┼─────────┘  │
- └─────────────────────────────────────────────────────────────────────┼────────────┘
-                                                                       ▼
-         KeyboardOutput thread ─► pynput.keyboard.Controller ─► focused application
-         TrayUI thread (pystray) ◄─ state colour       Toast threads (winotify / plyer)
-         Main thread: HudLoop ◄─ HudChannel ◄─ snapshots   (only when ENABLE_HUD = True)
-                      └─► OpenCV window: feed + skeleton + state/pose/gesture overlay
-```
+The webcam captures your hand, and MediaPipe extracts the 3D positions of its 21 joints. A custom Random Forest model then classifies the static ASL letter you are holding, or the system detects an open-palm swipe for editing (space, backspace or enter). The resulting keystroke is injected directly into whichever application is active.
 
 Each thread is the only owner of the resources it touches: the camera, the MediaPipe graph and the input controller are never shared across threads. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design review covering thread safety, camera release and the edge cases it fixed.
 
