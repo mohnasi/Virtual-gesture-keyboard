@@ -18,6 +18,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Tuple
 
+# =========================================================================== #
+#  ENABLE_HUD - live telemetry window (webcam feed + hand skeleton + state).
+#  True  : a small, draggable, always-on-top window opens in the top-right
+#          corner of the screen. Great for learning the gestures and tuning.
+#  False : pure low-power background mode - no window is ever created, no
+#          frames are resized/drawn, and OpenCV's GUI is never touched.
+#  Can also be overridden per launch with ``--hud`` / ``--no-hud``.
+# =========================================================================== #
+ENABLE_HUD: bool = True
+
 
 # --------------------------------------------------------------------------- #
 # System states and their power budgets
@@ -177,6 +187,22 @@ class UIConfig:
 
 
 @dataclass(frozen=True)
+class HudConfig:
+    enabled: bool = ENABLE_HUD
+    window_name: str = "Gesture Keyboard HUD"
+    scale: float = 0.75                    # 640x360 feed -> 480x270 window
+    margin_px: int = 24                    # gap from the screen's top-right corner
+    always_on_top: bool = True
+    no_activate: bool = True               # Windows: never steal keyboard focus
+                                           # (typed keys must reach YOUR app)
+    trail_s: float = 0.6                   # wrist trajectory drawn behind the hand
+    event_display_s: float = 2.0           # how long the last gesture stays visible
+    dim_when_gated: bool = True            # darken the feed while ML is asleep
+    refresh_ms_active: int = 10            # HighGUI event-pump interval (ACTIVE)
+    refresh_ms_low_power: int = 50         # ... in IDLE / DEEP STANDBY
+
+
+@dataclass(frozen=True)
 class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
@@ -187,6 +213,7 @@ class Config:
     state: StateMachineConfig = field(default_factory=StateMachineConfig)
     keyboard: KeyboardConfig = field(default_factory=KeyboardConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    hud: HudConfig = field(default_factory=HudConfig)
     log_level: str = "INFO"
 
 

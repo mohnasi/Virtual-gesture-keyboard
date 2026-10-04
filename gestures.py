@@ -313,11 +313,24 @@ class StaticHoldDetector(Detector):
 
     def reset(self) -> None:
         self._armed = True
+        self._run_start: Optional[float] = None
+        self._last_t: Optional[float] = None
+
+    @property
+    def progress(self) -> float:
+        """0..1 fraction of the hold completed (telemetry only)."""
+        if self._run_start is None or self._last_t is None or not self._armed:
+            return 0.0
+        return min(1.0, (self._last_t - self._run_start) / self.hold_s)
 
     def update(self, rec, buf):
+        self._last_t = rec.t
         if rec.pose != self.pose:
             self._armed = True                # re-arm once the pose is released
+            self._run_start = None
             return None
+        if self._run_start is None:
+            self._run_start = rec.t
         if not self._armed:
             return None
         window = buf.since(rec.t - self.hold_s)
@@ -354,6 +367,11 @@ class RepetitionDetector(Detector):
                          if state == SystemState.DEEP_STANDBY
                          else self._cfg.sequence_window_s)
         self._need = max(1, math.ceil(self._cfg.sequence_min_hold_s * fps))
+
+    @property
+    def progress(self) -> int:
+        """Repetitions counted inside the current window (telemetry only)."""
+        return len(self._entries)
 
     def reset(self) -> None:
         self._in_pose = False
@@ -392,12 +410,16 @@ class GestureClassifier:
                  extra_detectors: Iterable[Detector] = ()) -> None:
         self._pose_cfg = pose_cfg
         self.buffer = TemporalBuffer(gesture_cfg.buffer_len)
+        self.wake = StaticHoldDetector(Pose.OPEN_PALM, gesture_cfg.wake_hold_s,
+                                       gesture_cfg.wake_min_pose_share,
+                                       gesture_cfg.wake_max_drift)
+        self.off_sequence = RepetitionDetector(Pose.THUMB_DOWN, gesture_cfg)
+        self.on_sequence = RepetitionDetector(Pose.THUMB_UP, gesture_cfg)
         self.detectors: List[Detector] = [
             SwipeDetector(gesture_cfg),
-            StaticHoldDetector(Pose.OPEN_PALM, gesture_cfg.wake_hold_s,
-                               gesture_cfg.wake_min_pose_share, gesture_cfg.wake_max_drift),
-            RepetitionDetector(Pose.THUMB_DOWN, gesture_cfg),
-            RepetitionDetector(Pose.THUMB_UP, gesture_cfg),
+            self.wake,
+            self.off_sequence,
+            self.on_sequence,
             *extra_detectors,
         ]
 

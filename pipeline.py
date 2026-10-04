@@ -11,14 +11,17 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 from camera import Frame, LatestFrameSlot
-from gestures import GestureClassifier
+from gestures import GestureClassifier, GestureKind
 from keyboard_output import KeyboardOutput, KeyMapper
 from motion_gate import MotionGate
 from state_machine import StateMachine
-from tracker import HandTracker
+from tracker import HandObservation, HandTracker
+
+if TYPE_CHECKING:  # the HUD module is only imported when the HUD is enabled
+    from hud import HudChannel
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class InferenceWorker(threading.Thread):
         mapper: KeyMapper,
         keyboard: KeyboardOutput,
         stop_event: threading.Event,
+        hud: "Optional[HudChannel]" = None,
     ) -> None:
         super().__init__(name="InferenceWorker", daemon=True)
         self._slot = slot
@@ -53,6 +57,11 @@ class InferenceWorker(threading.Thread):
         self.frames_seen = 0
         self.inferences_run = 0
         self.inferences_skipped = 0
+        # telemetry for the HUD (touched only on this thread)
+        self._hud = hud
+        self._last_event = None
+        self._last_key: Optional[str] = None
+        self._last_key_t = float("-inf")
 
     def run(self) -> None:
         tracker = None
@@ -88,11 +97,17 @@ class InferenceWorker(threading.Thread):
 
         hand_present = None          # None == "no new evidence" (gated)
         events = []
+        obs: Optional[HandObservation] = None
+        pose = None
+        infer_ms = 0.0
         if run:
+            t0 = time.perf_counter()
             obs = tracker.process(frame.image, frame.timestamp)
+            infer_ms = (time.perf_counter() - t0) * 1000.0
             self.inferences_run += 1
             hand_present = obs.present
             events = self._classifier.update(obs)
+            pose = self._classifier.last_pose   # read before a transition resets it
             for ev in events:
                 log.debug("Gesture %s", ev)
         else:
@@ -103,4 +118,42 @@ class InferenceWorker(threading.Thread):
             key = self._mapper.map(ev)
             if key is not None:
                 self._keyboard.submit(key)
+                self._last_key, self._last_key_t = key, frame.timestamp
                 log.info("Key %r <- %s + swipe %s", key, ev.pose.value, ev.direction.value)
+
+        if events:
+            # Control gestures (HOLD / SEQUENCE) are more informative than a
+            # simultaneous swipe, so they win the single "last gesture" slot.
+            events_sorted = sorted(events, key=lambda e: e.kind == GestureKind.SWIPE)
+            self._last_event = events_sorted[0]
+        if self._hud is not None and self._hud.visible:
+            self._publish_hud(frame, not run, obs, pose, infer_ms)
+
+    def _publish_hud(self, frame: Frame, gated: bool, obs: Optional[HandObservation],
+                     pose, infer_ms: float) -> None:
+        from hud import HudSnapshot
+
+        clf = self._classifier
+        trail = tuple(
+            (float(r.obs.wrist_px[0]), float(r.obs.wrist_px[1]))
+            for r in clf.buffer.since(frame.timestamp - self._hud.trail_s) if r.obs.present
+        )
+        self._hud.publish(HudSnapshot(
+            image=frame.image,
+            timestamp=frame.timestamp,
+            state=self._sm.state,
+            target_fps=self._sm.target_fps,
+            gated=gated,
+            hand=obs,
+            pose=pose,
+            last_event=self._last_event,
+            last_key=self._last_key,
+            last_key_t=self._last_key_t,
+            alt_layer=self._mapper.alt_layer,
+            trail=trail,
+            infer_ms=infer_ms,
+            wake_progress=clf.wake.progress,
+            off_progress=clf.off_sequence.progress,
+            on_progress=clf.on_sequence.progress,
+            reps_needed=clf.off_sequence.reps,
+        ))

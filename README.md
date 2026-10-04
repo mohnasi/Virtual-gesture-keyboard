@@ -26,7 +26,7 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
 
 - **Tactile-free.** Large, slow, forgiving motions instead of precise key strikes.
 - **Works everywhere.** Keystrokes are injected at the OS level (via `pynput`), so it types into any focused app: browser, IDE, terminal, chat.
-- **Invisible until needed.** No window. A coloured tray dot shows the state, and toast notifications appear only for major changes.
+- **Invisible until needed.** A coloured tray dot shows the state, and toast notifications appear only for major changes. An optional live telemetry HUD helps you learn the gestures, and one config flag turns it off for pure background mode.
 - **Gentle on the battery.** A three-tier power state machine and a pre-ML motion gate mean the neural network barely runs when you aren't using it.
 
 ---
@@ -77,6 +77,8 @@ Many of these users still have good **gross arm and hand mobility**: they can ra
                                                                        ▼
          KeyboardOutput thread ─► pynput.keyboard.Controller ─► focused application
          TrayUI thread (pystray) ◄─ state colour       Toast threads (winotify / plyer)
+         Main thread: HudLoop ◄─ HudChannel ◄─ snapshots   (only when ENABLE_HUD = True)
+                      └─► OpenCV window: feed + skeleton + state/pose/gesture overlay
 ```
 
 Each thread is the only owner of the resources it touches: the camera, the MediaPipe graph and the input controller are never shared across threads. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design review covering thread safety, camera release and the edge cases it fixed.
@@ -92,6 +94,27 @@ Each thread is the only owner of the resources it touches: the camera, the Media
 | **DEEP STANDBY** | 🔴 Red | 1 FPS | On | Only after motion (+3 s latch) | ⛔ Hard-disabled | "On ×3" → IDLE |
 
 Entering or leaving DEEP STANDBY shows a native desktop notification. The tray menu also has **Activate now**, **Pause typing (Deep Standby)**, **Resume** and **Quit**, for carers or for moments when gestures aren't practical.
+
+---
+
+## Live telemetry HUD
+
+<img src="docs/hud_preview.png" alt="HUD in ACTIVE, IDLE and DEEP STANDBY (rendered from synthetic test data)" width="100%"/>
+
+<sub>The three states, rendered by the HUD from the project's synthetic test hands.</sub>
+
+A small window (480×270 by default) opens in the **top-right corner** of the screen and stays on top. It shows:
+
+| Where | What |
+|---|---|
+| Video | Live webcam feed with the **21-joint MediaPipe hand skeleton** drawn over your hand, plus the recent wrist trajectory (cyan trail). A large arrow flashes when a swipe is recognised |
+| Top bar | **System state** (colour-coded like the tray), measured vs. target FPS, and MediaPipe inference time, or `ML skipped` when the motion gate is sleeping |
+| Bottom bar | **Current pose** (`POINT`, `OPEN_PALM`, …), the **last recognised gesture** with the key it typed (e.g. `SWIPE RIGHT (POINT) -> 't'`), the `ALT LAYER` / `TYPING OFF` badges, and progress bars for the wake hold and the ×3 sequences |
+
+- **Move it** by dragging anywhere on the video with the mouse. It also reopens in the top-right corner every time.
+- **It never steals focus.** On Windows the HUD is a no-activate tool window, so clicking or dragging it never takes keyboard focus away from the app you're typing into. On macOS and Linux, click back into your app after moving the HUD.
+- **Close it** with its ✕ to keep running headless. Bring it back from the tray menu with **Show telemetry HUD**.
+- **Turn it off completely** with `ENABLE_HUD = False` at the top of [`config.py`](config.py), or `--no-hud` for a single run. The HUD module is then never imported and no OpenCV window is ever created, so the daemon runs in pure low-power background mode.
 
 ---
 
@@ -187,6 +210,7 @@ python main.py
 | `--tracker` | `auto` | `solutions` (Lite model), `tasks`, or `auto` fallback |
 | `--start-active` | off | Start in ACTIVE instead of IDLE |
 | `--no-mirror` | off | Disable the selfie-view mirror |
+| `--hud` / `--no-hud` | `ENABLE_HUD` | Show or hide the live telemetry window for this run |
 | `--no-tray` / `--no-toasts` | off | Run without the tray icon / notifications |
 | `--log-level` | `INFO` | `DEBUG` logs every recognised gesture |
 
@@ -207,8 +231,9 @@ gesture-virtual-keyboard/
 ├── state_machine.py     # ACTIVE / IDLE / DEEP_STANDBY transitions
 ├── keyboard_output.py   # KeyMapper + pynput injection worker
 ├── ui.py                # pystray tray icon + toast notifications
+├── hud.py               # live telemetry HUD (renderer + draggable window)
 ├── pipeline.py          # InferenceWorker: gate → track → classify → act
-├── tests/               # 61 hardware-free tests (synthetic hands, fake camera)
+├── tests/               # 80 hardware-free tests (synthetic hands, fake camera/GUI)
 └── docs/ARCHITECTURE.md # design review & threading model
 ```
 
@@ -218,7 +243,7 @@ The test suite needs **no webcam, no MediaPipe and no keyboard backend**. It dri
 
 ```bash
 pip install -r requirements-dev.txt
-pytest          # 61 tests
+pytest          # 80 tests
 ruff check .
 ```
 
@@ -233,7 +258,8 @@ CI runs both on Python 3.10, 3.11, 3.12 and 3.13.
 ## Roadmap
 
 - [ ] Per-user calibration wizard (records your own pose templates and swipe speed)
-- [ ] Optional on-screen overlay showing the current row/layer for new users
+- [x] Live telemetry HUD (skeleton, state, pose, gesture)
+- [ ] Key-layout cheat-sheet overlay in the HUD for new users
 - [ ] Word prediction / auto-complete to cut the strokes needed per word
 - [ ] Learned temporal classifier (1D-CNN / GRU over the landmark buffer) as a drop-in `Detector`
 

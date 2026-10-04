@@ -6,7 +6,7 @@ This document records the architectural self-critique done **before** implementa
 
 | Thread | Owns exclusively | Talks to others via |
 |---|---|---|
-| `MainThread` | wiring, signal handlers, ordered shutdown (tray loop on macOS) | `stop_event` |
+| `MainThread` | wiring, signal handlers, ordered shutdown, **telemetry HUD** (all OpenCV HighGUI calls), tray loop on macOS | `stop_event`, `HudChannel.latest()` |
 | `CaptureWorker` | `cv2.VideoCapture` (open → read → **release**) | `LatestFrameSlot.publish()` |
 | `InferenceWorker` | MediaPipe graph, `MotionGate`, `GestureClassifier`, state-machine writes | `KeyboardOutput.submit()`, state listeners |
 | `KeyboardOutput` | `pynput.keyboard.Controller` | bounded `queue.Queue` |
@@ -58,6 +58,11 @@ DEEP STANDBY must *guarantee* no keystrokes. Three independent barriers enforce 
 | 9 | A `threading.Thread` subclass attribute named `_stop` | On Python ≤ 3.12 it shadows `Thread._stop()`, so `join()` raises `TypeError` | Renamed to `_stop_event`. Caught by running the suite on 3.10, 3.11, 3.12 and 3.13 |
 | 10 | `pythonw.exe` has `sys.stderr = None` | Logging setup crashes when run headless | A rotating file log is always written. The console handler is added only when stderr exists |
 | 11 | pystray on macOS must run on the main thread | The tray crashes on macOS | `run_blocking()` runs on the main thread there, and a daemon thread is used elsewhere |
+| 12 | OpenCV HighGUI is thread-affine (main thread on macOS) | Windows freeze or crash if `imshow` and `waitKey` run on different threads | Every HighGUI call lives in `HudLoop.run` on the main thread. The inference thread only publishes immutable `HudSnapshot`s to a single-slot `HudChannel` |
+| 13 | A HUD window steals keyboard focus | Typed gestures land in the HUD instead of the user's app | On Windows: `WS_EX_NOACTIVATE \| WS_EX_TOOLWINDOW`, and the previous foreground window is restored after the HUD opens. Dragging is done by a mouse callback, which never activates the window |
+| 14 | A `-headless` OpenCV build has no GUI | `namedWindow` raises and the daemon would crash | `HudWindow.open()` catches `cv2.error`, logs a hint and hides the HUD. Typing keeps working |
+| 15 | Hershey glyph advance grows with stroke thickness | A thick black "outline" drifts away from the text | The overlay uses a same-thickness 1 px drop shadow instead |
+| 16 | A state transition resets the classifier in the middle of a frame | The HUD would show "no hand" right after waking | The pose is captured before `sm.step()` runs |
 
 ## 4. Power model
 
@@ -66,5 +71,7 @@ DEEP STANDBY must *guarantee* no keystrokes. Three independent barriers enforce 
 | ACTIVE | 30 | 30 | 30 |
 | IDLE | 5 | 0 (after 3 s latch) | ≤ 5 |
 | DEEP STANDBY | 1 | 0 (after 3 s latch) | ≤ 1 |
+
+With `ENABLE_HUD = True`, each processed frame adds one 640×360 → 480×270 resize, a few vector draws and an `imshow`. The snapshot hand-off is skipped while the HUD is hidden. With `ENABLE_HUD = False` the HUD module is never imported.
 
 The motion gate costs one 160×90 resize, a grayscale conversion, a blur, an `absdiff` and `countNonZero`: microseconds per frame.

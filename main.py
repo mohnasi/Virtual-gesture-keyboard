@@ -3,7 +3,8 @@ Gesture Virtual Keyboard - headless, low-power accessibility daemon.
 
 Thread model
 ------------
-    main thread     : wiring, signal handling, ordered shutdown (tray on macOS)
+    main thread     : wiring, signals, ordered shutdown, telemetry HUD
+                      (OpenCV HighGUI is thread-affine), tray on macOS
     CaptureWorker   : sole owner of cv2.VideoCapture (open / read / release)
     InferenceWorker : sole owner of MediaPipe, motion gate, classifier, state
     KeyboardOutput  : sole caller of pynput (OS keystroke injection)
@@ -57,6 +58,13 @@ class GestureKeyboardApp:
         self.keyboard = KeyboardOutput(cfg.keyboard)
         self.notifier = Notifier(cfg.ui.app_name, cfg.ui.toasts_enabled)
 
+        # Telemetry HUD: imported only when enabled, so ENABLE_HUD=False keeps
+        # OpenCV's GUI completely untouched (pure background mode).
+        self.hud_channel = None
+        if cfg.hud.enabled:
+            from hud import HudChannel
+            self.hud_channel = HudChannel(visible=True, trail_s=cfg.hud.trail_s)
+
         self.capture = CaptureWorker(cfg.camera, self.slot,
                                      fps_provider=lambda: self.sm.target_fps,
                                      stop_event=self.stop_event)
@@ -65,8 +73,13 @@ class GestureKeyboardApp:
             gated_states=cfg.motion.enabled_states,
             tracker_factory=lambda: HandTracker(cfg.tracker, cfg.camera.width, cfg.camera.height),
             mapper=self.mapper, keyboard=self.keyboard, stop_event=self.stop_event,
+            hud=self.hud_channel,
         )
-        self.tray = TrayUI(cfg.ui, self.sm.request, self.request_shutdown) if use_tray else None
+        self.tray = TrayUI(
+            cfg.ui, self.sm.request, self.request_shutdown,
+            hud_toggle=self.hud_channel.toggle if self.hud_channel else None,
+            hud_visible=(lambda: self.hud_channel.visible) if self.hud_channel else None,
+        ) if use_tray else None
         self.sm.add_listener(self._on_transition)
 
     # ------------------------------------------------------------------ #
@@ -129,7 +142,16 @@ class GestureKeyboardApp:
             if self.tray:
                 self.tray.set_state(self.sm.state)
 
-            if self.tray and self.tray.available and sys.platform == "darwin":
+            if self.hud_channel is not None:
+                # HighGUI must live on the main thread; the tray gets its own
+                # thread (or, on macOS, attaches to the loop the HUD pumps).
+                if self.tray:
+                    if sys.platform == "darwin":
+                        self.tray.start_detached()
+                    else:
+                        self.tray.start()
+                self._run_hud()
+            elif self.tray and self.tray.available and sys.platform == "darwin":
                 # AppKit insists on the main thread; stop the loop on shutdown.
                 threading.Thread(target=self._stop_tray_when_done, daemon=True).start()
                 self.tray.run_blocking()
@@ -145,6 +167,13 @@ class GestureKeyboardApp:
         finally:
             self.shutdown()
         return 1 if self.inference.error else 0
+
+    def _run_hud(self) -> None:
+        from hud import HudLoop, HudRenderer
+
+        renderer = HudRenderer(self.cfg.hud, self.cfg.ui.colors,
+                               (self.cfg.camera.width, self.cfg.camera.height))
+        HudLoop(self.cfg.hud, self.hud_channel, renderer).run(self.stop_event)
 
     def _stop_tray_when_done(self) -> None:
         self.stop_event.wait()
@@ -202,6 +231,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--start-active", action="store_true", help="start in ACTIVE instead of IDLE")
     p.add_argument("--no-tray", action="store_true", help="run without the tray icon")
     p.add_argument("--no-toasts", action="store_true", help="disable desktop notifications")
+    p.add_argument("--hud", action=argparse.BooleanOptionalAction, default=None,
+                   help="show/hide the live telemetry window (default: config.ENABLE_HUD)")
     p.add_argument("--log-level", default=DEFAULT_CONFIG.log_level)
     return p.parse_args(argv)
 
@@ -216,6 +247,7 @@ def build_config(args: argparse.Namespace) -> Config:
         state=dataclasses.replace(c.state, initial_state=SystemState.ACTIVE
                                   if args.start_active else c.state.initial_state),
         ui=dataclasses.replace(c.ui, toasts_enabled=not args.no_toasts),
+        hud=dataclasses.replace(c.hud, enabled=c.hud.enabled if args.hud is None else args.hud),
         log_level=args.log_level,
     )
 

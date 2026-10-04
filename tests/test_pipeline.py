@@ -24,7 +24,7 @@ class ScriptedTracker:
 
 
 def make_app():
-    cfg = build_config(parse_args(["--no-tray", "--no-toasts"]))
+    cfg = build_config(parse_args(["--no-tray", "--no-toasts", "--no-hud"]))
     cfg = dataclasses.replace(cfg, motion=dataclasses.replace(cfg.motion, enabled_states=()))
     app = GestureKeyboardApp(cfg, use_tray=False)
     fc = FakeController()

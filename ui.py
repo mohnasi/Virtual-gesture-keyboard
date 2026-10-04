@@ -76,10 +76,14 @@ class Notifier:
 
 class TrayUI:
     def __init__(self, cfg: UIConfig, on_command: Callable[[Command], None],
-                 on_quit: Callable[[], None]) -> None:
+                 on_quit: Callable[[], None],
+                 hud_toggle: Optional[Callable[[], None]] = None,
+                 hud_visible: Optional[Callable[[], bool]] = None) -> None:
         self._cfg = cfg
         self._on_command = on_command
         self._on_quit = on_quit
+        self._hud_toggle = hud_toggle
+        self._hud_visible = hud_visible or (lambda: False)
         self._lock = threading.Lock()
         self._state = SystemState.IDLE
         self._icon = None
@@ -105,6 +109,10 @@ class TrayUI:
             Item("Pause typing (Deep Standby)", lambda: self._on_command(Command.FORCE_STANDBY)),
             Item("Resume (Idle)", lambda: self._on_command(Command.RESUME)),
             pystray.Menu.SEPARATOR,
+            Item("Show telemetry HUD", lambda: self._hud_toggle(),
+                 checked=lambda _: self._hud_visible(),
+                 visible=self._hud_toggle is not None),
+            pystray.Menu.SEPARATOR,
             Item("Quit", self._quit),
         )
         self._icon = pystray.Icon("gesture_virtual_keyboard", self._images[self._state],
@@ -123,6 +131,17 @@ class TrayUI:
             return
         self._thread = threading.Thread(target=self.run_blocking, name="TrayUI", daemon=True)
         self._thread.start()
+
+    def start_detached(self) -> None:
+        """macOS + HUD: the HUD's HighGUI loop owns the main thread and pumps
+        AppKit events, so the status item is attached without its own loop."""
+        if not self.available:
+            return
+        try:
+            self._icon.run_detached()
+        except Exception:
+            log.exception("Could not attach tray icon; continuing without it")
+            self.available = False
 
     def run_blocking(self) -> None:
         """Run the tray loop on the calling thread (required on macOS)."""
