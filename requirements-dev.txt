@@ -1,0 +1,5 @@
+# Hardware-free test suite (no webcam, MediaPipe or input backend required)
+numpy>=1.24
+opencv-python-headless>=4.8
+pytest>=8.0
+ruff>=0.5

@@ -1,0 +1,18 @@
+[project]
+name = "gesture-virtual-keyboard"
+version = "1.0.0"
+description = "Low-power computer vision virtual keyboard translating continuous hand gestures to OS keystrokes for accessibility."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]

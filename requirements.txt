@@ -1,0 +1,17 @@
+# --- Computer vision -------------------------------------------------------
+# mediapipe pulls in opencv-contrib-python (cv2) and a compatible numpy.
+# Python 3.10-3.12: last release with the legacy Solutions API, which exposes
+# the Lite hand model via model_complexity=0 (preferred, lowest power).
+mediapipe==0.10.21 ; python_version < "3.13"
+# Python 3.13+: Solutions API was removed; the Tasks HandLandmarker is used and
+# its model bundle is downloaded once into ./models on first launch.
+mediapipe>=0.10.30 ; python_version >= "3.13"
+opencv-contrib-python>=4.8
+numpy>=1.24
+
+# --- OS integration --------------------------------------------------------
+pynput>=1.7.6                                 # global keystroke injection
+pystray>=0.19.5                               # system-tray status icon
+Pillow>=10.0                                  # tray icon rendering
+winotify>=1.1.0 ; sys_platform == "win32"     # native Windows 10/11 toasts
+plyer>=2.1 ; sys_platform != "win32"          # macOS / Linux notifications
