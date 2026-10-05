@@ -10,7 +10,7 @@ Layers
                             ~1.5 s @ 30 FPS) of per-frame records.
 3. ``GestureClassifier``  - runs a list of pluggable ``Detector`` objects over
                             the buffer and emits ``GestureEvent``s:
-      * ``SwipeDetector``      wrist-trajectory strokes -> SWIPE(direction, pose)
+      * ``SwipeDetector``      fingertip (or wrist) strokes -> SWIPE(direction, pose)
       * ``StaticHoldDetector`` steady pose for N seconds -> HOLD(pose)
       * ``RepetitionDetector`` pose entered K times in a window -> SEQUENCE(pose)
       * ``LetterDetector``     static ASL letter held 0.4 s     -> LETTER(label)
@@ -20,11 +20,12 @@ Add a new gesture by subclassing ``Detector`` and passing it to
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Deque, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -33,6 +34,8 @@ from tracker import (
     INDEX_MCP, INDEX_PIP, INDEX_TIP, MIDDLE_PIP, MIDDLE_TIP, PINKY_PIP, PINKY_TIP,
     RING_PIP, RING_TIP, THUMB_IP, THUMB_MCP, THUMB_TIP, HandObservation,
 )
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -198,9 +201,36 @@ class Detector:
         raise NotImplementedError
 
 
+_TIPS = [INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]   # list: numpy fancy index
+
+
+def fingertips_px(obs: HandObservation) -> np.ndarray:
+    """(4, 2) index..pinky tip positions in pixels. Exact: the normalisation
+    is only a translation to the wrist and a scale by ``palm_px``."""
+    return obs.wrist_px + obs.landmarks[_TIPS, :2] * obs.palm_px
+
+
+def fingertip_reach(obs: HandObservation) -> np.ndarray:
+    """(4,) tip-to-wrist distances in palm lengths: the hand's shape, blind
+    to where the hand is or how it is turned."""
+    return np.linalg.norm(obs.landmarks[_TIPS], axis=1)
+
+
+def track_point(obs: HandObservation, mode: str = "fingertips") -> np.ndarray:
+    """(2,) pixel point a swipe follows: fingertip centroid or the wrist."""
+    return fingertips_px(obs).mean(axis=0) if mode == "fingertips" else obs.wrist_px
+
+
 class SwipeDetector(Detector):
-    """Segments wrist-trajectory strokes with a speed hysteresis, then
-    validates distance, straightness and axis dominance on the buffered curve.
+    """Segments strokes of the tracked point (fingertip centroid, or the
+    wrist) with a speed hysteresis, then validates distance, straightness and
+    axis dominance on the buffered curve.
+
+    In fingertip mode a frame step where the fingers curl or uncurl quickly
+    (``swipe_max_shape_rate``) carries no motion, so changing hand shape -
+    between letters, or relaxing right after a swipe - never moves the
+    tracked point. A stroke must also keep all four tips travelling together
+    and the overall shape steady (catches slow curls).
 
     Distances are in palm lengths so the same physical motion works whether
     the user sits 40 cm or 1.5 m from the camera.
@@ -210,6 +240,11 @@ class SwipeDetector(Detector):
 
     def __init__(self, cfg: GestureConfig) -> None:
         self._cfg = cfg
+        self._tips = cfg.swipe_track_point == "fingertips"
+        self._aliases = {Pose(k): Pose(v) for k, v in cfg.swipe_pose_aliases.items()}
+        # Optional per-stroke telemetry hook (``--swipe-log``): called with one
+        # dict of metrics + outcome for every stroke the segmenter closes.
+        self.on_stroke: Optional[Callable[[dict], None]] = None
         self.reset()
 
     def reset(self) -> None:
@@ -219,11 +254,39 @@ class SwipeDetector(Detector):
         self._rest_t: Optional[float] = None      # last frame the hand was ~still
         self._last_t = float("-inf")
         self._last_dir: Optional[Direction] = None
+        self.last_reject: Optional[str] = None    # why the last near-miss failed
+        self.last_reject_t = float("-inf")
+        self._stroke_end_t = float("-inf")        # last time any stroke closed
+
+    def busy(self, t: float, after_s: float) -> bool:
+        """A stroke is in flight, or one closed less than ``after_s`` ago."""
+        return self._stroke_t0 is not None or t - self._stroke_end_t < after_s
+
+    @property
+    def track_mode(self) -> str:
+        return self._cfg.swipe_track_point
+
+    def _step(self, a: FrameRecord, b: FrameRecord, palm: float):
+        """Motion a -> b in palm lengths: ((4, 2) tip travel, (4,) reach
+        change, rigid). Wrist mode copies the wrist step to every 'tip'."""
+        if not self._tips:
+            d = (b.obs.wrist_px - a.obs.wrist_px) / palm
+            return np.tile(d, (4, 1)), np.zeros(4), True
+        travel = (fingertips_px(b.obs) - fingertips_px(a.obs)) / palm
+        reach = fingertip_reach(b.obs) - fingertip_reach(a.obs)
+        rigid = float(np.abs(reach).max()) <= self._cfg.swipe_max_shape_rate * (b.t - a.t)
+        return travel, reach, rigid
 
     def update(self, rec, buf):
         if not rec.obs.present:
+            # A fast sweep often carries the hand out of frame (or blurs it
+            # past tracking): judge the stroke on the frames we did see.
+            ev = None
+            if self._stroke_t0 is not None and self._prev is not None:
+                ev = self._evaluate(buf.since(self._stroke_t0), self._stroke_t0,
+                                    self._prev.t, "hand_lost")
             self._prev, self._stroke_t0, self._rest_t, self._speed = None, None, None, 0.0
-            return None
+            return ev
         prev, self._prev = self._prev, rec
         if prev is None:
             return None
@@ -232,8 +295,8 @@ class SwipeDetector(Detector):
             self._stroke_t0, self._rest_t, self._speed = None, None, 0.0
             return None
 
-        palm = 0.5 * (rec.obs.palm_px + prev.obs.palm_px)
-        inst = float(np.linalg.norm(rec.obs.wrist_px - prev.obs.wrist_px)) / palm / dt
+        travel, _, rigid = self._step(prev, rec, 0.5 * (rec.obs.palm_px + prev.obs.palm_px))
+        inst = float(np.linalg.norm(travel.mean(axis=0))) / dt if rigid else 0.0
         a = self._cfg.speed_smoothing
         self._speed = a * inst + (1 - a) * self._speed
 
@@ -244,62 +307,123 @@ class SwipeDetector(Detector):
                 self._rest_t = prev.t
             if self._speed >= self._cfg.swipe_start_speed:
                 # The EMA lags a frame or two; anchor the stroke at the last
-                # rest point so the full displacement is measured.
-                self._stroke_t0 = self._rest_t
+                # rest point so the full displacement is measured - but not
+                # so far back that slow drift before the sweep counts.
+                self._stroke_t0 = max(self._rest_t, rec.t - self._cfg.swipe_anchor_lookback_s)
             return None
 
         duration = rec.t - self._stroke_t0
         if self._speed > self._cfg.swipe_end_speed and duration <= self._cfg.swipe_max_duration_s:
             return None                               # stroke still in flight
+        ended = "still" if self._speed <= self._cfg.swipe_end_speed else "timeout"
         t0, self._stroke_t0, self._rest_t = self._stroke_t0, None, rec.t
-        return self._evaluate(buf.since(t0), t0, rec.t)
+        return self._evaluate(buf.since(t0), t0, rec.t, ended)
 
-    def _evaluate(self, recs: List[FrameRecord], t0: float, t1: float):
-        c = self._cfg
-        pts = [r for r in recs if r.obs.present]
+    def _evaluate(self, recs: List[FrameRecord], t0: float, t1: float, ended: str):
+        self._stroke_end_t = t1
+        pts = [r for r in recs if r.obs.present and r.t <= t1]
         if len(pts) < 2:
             return None
-        duration = t1 - t0
-        if not (c.swipe_min_duration_s <= duration <= c.swipe_max_duration_s):
-            return None
+        m = self._measure(pts, t0, t1)
+        m["ended"] = ended
+        outcome, reason = self._judge(m)
+        event = None
+        if outcome == "swipe":
+            direction, pose = Direction(m["direction"]), Pose(m["pose"])
+            self._last_t = t1
+            # A FIST stroke is the "clutch" (reposition without typing): it
+            # also cancels return suppression so the next stroke is free.
+            self._last_dir = None if pose == Pose.FIST else direction
+            event = GestureEvent(GestureKind.SWIPE, pose, t1, direction)
+        elif outcome == "return_suppressed":
+            self._last_dir = None
+        if reason and outcome != "jitter":
+            self.last_reject, self.last_reject_t = reason, t1
+            log.debug("Swipe rejected: %s", reason)
+        if self.on_stroke is not None:
+            self.on_stroke({**m, "outcome": outcome, "reason": reason or ""})
+        return event
 
-        steps = np.array([(b.obs.wrist_px - a.obs.wrist_px)
-                          / (0.5 * (a.obs.palm_px + b.obs.palm_px))
-                          for a, b in zip(pts, pts[1:])])
+    def _measure(self, pts: List[FrameRecord], t0: float, t1: float) -> dict:
+        """Every number the checks look at, so a log row explains the verdict."""
+        # One scale for the whole stroke: a hand turning mid-sweep shortens
+        # its palm on screen, and per-frame scaling would bend the curve.
+        palm = float(np.median([r.obs.palm_px for r in pts]))
+        tip_steps, reach_steps, dts = [], [], []
+        for a, b in zip(pts, pts[1:]):
+            travel, reach, rigid = self._step(a, b, palm)
+            if rigid:                                 # shape changes carry no motion
+                tip_steps.append(travel)
+                reach_steps.append(reach)
+                dts.append(b.t - a.t)
+        n_steps = len(pts) - 1
+        m = dict(t_start=t0, t_end=t1, duration=t1 - t0, frames=len(pts), palm_px=palm,
+                 rigid_share=len(tip_steps) / n_steps, dx=0.0, dy=0.0, distance=0.0,
+                 path=0.0, straightness=0.0, axis_ratio=0.0, peak_speed=0.0,
+                 direction="", tip_cos_min=1.0, tip_share_min=1.0, shape_drift=0.0)
+        votes = Counter(self._aliases.get(r.pose, r.pose) for r in pts
+                        if r.pose not in (None, Pose.UNKNOWN))
+        m["pose_votes"] = " ".join(f"{p.value}:{n}" for p, n in votes.most_common())
+        m["pose"] = self._vote(votes).value
+        if not tip_steps:
+            return m
+
+        tip_steps = np.array(tip_steps)               # (n, 4, 2)
+        steps = tip_steps.mean(axis=1)                # tracked point, (n, 2)
         net = steps.sum(axis=0)
-        net_len = float(np.linalg.norm(net))
-        path_len = float(np.linalg.norm(steps, axis=1).sum())
-        if net_len < c.swipe_min_distance or path_len <= 0:
-            return None
-        if net_len / path_len < c.swipe_min_straightness:
-            return None
+        lens = np.linalg.norm(steps, axis=1)
+        net_len, path_len = float(np.linalg.norm(net)), float(lens.sum())
         major, minor = sorted((abs(net[0]), abs(net[1])), reverse=True)
-        if minor > 0 and major / minor < c.swipe_axis_dominance:
-            return None
-
         if abs(net[0]) >= abs(net[1]):
             direction = Direction.RIGHT if net[0] > 0 else Direction.LEFT
         else:
             direction = Direction.DOWN if net[1] > 0 else Direction.UP
+        m.update(dx=float(net[0]), dy=float(net[1]), distance=net_len, path=path_len,
+                 straightness=net_len / path_len if path_len > 0 else 0.0,
+                 axis_ratio=major / minor if minor > 0 else float("inf"),
+                 peak_speed=float((lens / np.maximum(dts, 1e-6)).max()),
+                 direction=direction.value)
+        if self._tips:
+            # All four tips travel the same way, and the hand keeps its shape.
+            travel = tip_steps.sum(axis=0)            # (4, 2) net travel per tip
+            mean = travel.mean(axis=0)
+            mean_len = float(np.linalg.norm(mean))
+            tip_lens = np.linalg.norm(travel, axis=1)
+            cos = travel @ mean / np.maximum(tip_lens * mean_len, 1e-9)
+            drift = np.abs(np.cumsum(reach_steps, axis=0)).max(axis=0)   # per tip
+            m.update(tip_cos_min=float(cos.min()),
+                     tip_share_min=float(tip_lens.min()) / max(mean_len, 1e-9),
+                     shape_drift=float(drift.max()))
+        return m
 
+    def _judge(self, m: dict) -> Tuple[str, Optional[str]]:
+        """(outcome, reason) for a measured stroke; checks run in order."""
+        c = self._cfg
+        if m["distance"] < 0.5 * c.swipe_min_distance:
+            return "jitter", "jitter"                 # not worth showing on the HUD
+        if not (c.swipe_min_duration_s <= m["duration"] <= c.swipe_max_duration_s):
+            return "rejected", f"duration {m['duration']:.2f}s"
+        if m["distance"] < c.swipe_min_distance:
+            return "rejected", f"distance {m['distance']:.2f}<{c.swipe_min_distance}"
+        if m["straightness"] < c.swipe_min_straightness:
+            return "rejected", (f"straightness {m['straightness']:.2f}"
+                                f"<{c.swipe_min_straightness}")
+        if m["axis_ratio"] < c.swipe_axis_dominance:
+            return "rejected", "diagonal"
+        if m["tip_cos_min"] < c.swipe_tip_coherence or m["tip_share_min"] < c.swipe_tip_min_share:
+            return "rejected", "tips incoherent"
+        if m["shape_drift"] > c.swipe_max_shape_change:
+            return "rejected", "hand shape changed"
         # Return-stroke suppression: bringing the hand back after a swipe
         # must not type the opposite key.
-        if (self._last_dir is not None and direction == _OPPOSITE[self._last_dir]
-                and t0 - self._last_t < c.return_suppress_s):
-            self._last_dir = None
-            return None
-        if t0 - self._last_t < c.refractory_s:
-            return None
+        if (self._last_dir is not None and m["direction"] == _OPPOSITE[self._last_dir].value
+                and m["t_start"] - self._last_t < c.return_suppress_s):
+            return "return_suppressed", "return stroke ignored"
+        if m["t_start"] - self._last_t < c.refractory_s:
+            return "refractory", "too soon after last swipe"
+        return "swipe", None
 
-        pose = self._vote(pts)
-        self._last_t = t1
-        # A FIST stroke is the "clutch" (reposition without typing): it also
-        # cancels return suppression so the next stroke is free.
-        self._last_dir = None if pose == Pose.FIST else direction
-        return GestureEvent(GestureKind.SWIPE, pose, t1, direction)
-
-    def _vote(self, pts: List[FrameRecord]) -> Pose:
-        votes = Counter(r.pose for r in pts if r.pose not in (None, Pose.UNKNOWN))
+    def _vote(self, votes: Counter) -> Pose:
         if not votes:
             return Pose.UNKNOWN
         pose, n = votes.most_common(1)[0]
@@ -410,7 +534,8 @@ class LetterDetector(Detector):
     Per frame (ACTIVE only):
       1. Skip when there is no hand, the rule-based pose is a control pose
          (OPEN_PALM / THUMB_DOWN), a thumb-down was seen in the last 1.5 s
-         (mid "Off, Off, Off"), or the wrist is moving (swipes, repositioning).
+         (mid "Off, Off, Off"), the wrist is moving (swipes, repositioning),
+         or a swipe stroke is in flight / ended under ``after_swipe_s`` ago.
       2. Otherwise ask the model for class probabilities (rate-limited to
          ``max_predict_hz``) and smooth them with an EMA so M/N-style flicker
          does not reset the dwell.
@@ -435,6 +560,7 @@ class LetterDetector(Detector):
         self._suppress = {Pose(p) for p in cfg.suppress_poses}
         self._cooldown_poses = {Pose(p) for p in cfg.cooldown_poses}
         self._enabled = True
+        self.swipe: Optional[SwipeDetector] = None   # set by GestureClassifier
         self.reset()
 
     # ----------------------------------------------------------- telemetry -- #
@@ -519,7 +645,8 @@ class LetterDetector(Detector):
 
         if rec.pose in self._cooldown_poses:
             self._cooldown_until = rec.t + self._cfg.cooldown_s
-        if rec.pose in self._suppress or rec.t < self._cooldown_until:
+        if (rec.pose in self._suppress or rec.t < self._cooldown_until
+                or (self.swipe is not None and self.swipe.busy(rec.t, self._cfg.after_swipe_s))):
             self._probs, self.top = None, ()
             return None
         if self._speed > self._cfg.max_steady_speed:
@@ -555,8 +682,9 @@ class GestureClassifier:
                                        gesture_cfg.wake_max_drift)
         self.off_sequence = RepetitionDetector(Pose.THUMB_DOWN, gesture_cfg)
         self.on_sequence = RepetitionDetector(Pose.THUMB_UP, gesture_cfg)
+        self.swipe = SwipeDetector(gesture_cfg)
         self.detectors: List[Detector] = [
-            SwipeDetector(gesture_cfg),
+            self.swipe,
             self.wake,
             self.off_sequence,
             self.on_sequence,
@@ -566,6 +694,7 @@ class GestureClassifier:
         self.letters: Optional[LetterDetector] = None
         if letter_model is not None:
             self.letters = LetterDetector(letter_model, asl_cfg or AslConfig())
+            self.letters.swipe = self.swipe
             self.detectors.append(self.letters)
 
     def configure(self, state: SystemState, fps: float) -> None:

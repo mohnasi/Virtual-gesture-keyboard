@@ -2,9 +2,10 @@ import dataclasses
 
 import numpy as np
 
-from conftest import observation
+from conftest import HANDS, _rot, observation
 from config import SystemState
 from gestures import Direction, GestureClassifier, GestureKind, Pose
+from keyboard_output import KeyMapper
 
 FPS = 30.0
 DT = 1.0 / FPS
@@ -22,10 +23,10 @@ class Script:
         self.palm = palm
         self.events = []
 
-    def hold(self, pose, seconds, jitter=0.0, rng=None):
+    def hold(self, pose, seconds, jitter=0.0, rng=None, **kw):
         for _ in range(int(round(seconds / self.dt))):
             wrist = self.pos + (rng.normal(0, jitter, 2) if jitter else 0)
-            self._feed(pose, wrist)
+            self._feed(pose, wrist, **kw)
 
     def move(self, pose, dx_palms, dy_palms, seconds):
         n = int(round(seconds / self.dt))
@@ -38,9 +39,22 @@ class Script:
         for _ in range(int(round(seconds / self.dt))):
             self._feed(None, self.pos)
 
-    def _feed(self, pose, wrist):
+    def _feed(self, pose, wrist, **kw):
         self.t += self.dt
-        self.events += self.clf.update(observation(pose, self.t, wrist, self.palm))
+        self.events += self.clf.update(observation(pose, self.t, wrist, self.palm, **kw))
+
+    def flick(self, pose, deg0, deg1, seconds):
+        """Turn the hand about a fixed wrist (fingertips sweep, wrist doesn't)."""
+        n = int(round(seconds / self.dt))
+        for i in range(1, n + 1):
+            self._feed(pose, self.pos, degrees=deg0 + (deg1 - deg0) * i / n)
+
+    def morph(self, a, b, seconds):
+        """Blend hand shape a -> b in place (e.g. curl the fingers)."""
+        n = int(round(seconds / self.dt))
+        for i in range(1, n + 1):
+            k = i / n
+            self._feed(None, self.pos, shape=(1 - k) * HANDS[a] + k * HANDS[b])
 
     def kinds(self, kind):
         return [e for e in self.events if e.kind == kind]
@@ -115,6 +129,151 @@ def test_diagonal_stroke_rejected(cfg):
     s.move("POINT", 1.6, 1.6, 0.25)
     s.hold("POINT", 0.3)
     assert s.kinds(GestureKind.SWIPE) == []
+
+
+# ------------------------------------------------------- fingertip swipes -- #
+def _wrist_mode(cfg):
+    return dataclasses.replace(
+        cfg, gesture=dataclasses.replace(cfg.gesture, swipe_track_point="wrist"))
+
+
+def test_wrist_flick_is_a_swipe_with_fingertip_tracking(cfg):
+    for deg0, deg1, want in [(-20, 20, Direction.RIGHT), (20, -20, Direction.LEFT)]:
+        s = Script(cfg)
+        s.hold("OPEN_PALM", 0.3, degrees=deg0)
+        s.flick("OPEN_PALM", deg0, deg1, 0.2)
+        s.hold("OPEN_PALM", 0.3, degrees=deg1)
+        swipes = s.kinds(GestureKind.SWIPE)
+        assert [(e.direction, e.pose) for e in swipes] == [(want, Pose.OPEN_PALM)]
+
+
+def test_wrist_flick_is_missed_in_wrist_mode(cfg):
+    s = Script(_wrist_mode(cfg))
+    s.hold("OPEN_PALM", 0.3, degrees=-20)
+    s.flick("OPEN_PALM", -20, 20, 0.2)
+    s.hold("OPEN_PALM", 0.3, degrees=20)
+    assert s.kinds(GestureKind.SWIPE) == []
+
+
+def test_wrist_mode_still_detects_arm_sweeps(cfg):
+    s = Script(_wrist_mode(cfg))
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 2.0, 0.1, 0.25)
+    s.hold("OPEN_PALM", 0.3)
+    assert [e.direction for e in s.kinds(GestureKind.SWIPE)] == [Direction.RIGHT]
+
+
+def test_quick_finger_curl_in_place_is_not_a_swipe(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.hold("FIST", 0.5)                 # tips jump towards the wrist
+    s.hold("OPEN_PALM", 0.5)            # ... and back out
+    assert s.kinds(GestureKind.SWIPE) == []
+
+
+def test_slow_finger_curl_is_rejected_as_shape_change(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.morph("OPEN_PALM", "FIST", 0.5)   # tips slide ~1.3 palms "down"
+    s.hold("FIST", 0.5)
+    assert s.kinds(GestureKind.SWIPE) == []
+    assert s.clf.swipe.last_reject == "hand shape changed"
+
+
+def test_tips_disagreeing_is_rejected(cfg):
+    # The hand sweeps right while the pinky swings the other way around the
+    # wrist (its reach stays the same, so only the coherence check sees it).
+    def swung(deg):
+        shape = HANDS["OPEN_PALM"].copy()
+        shape[[20]] = _rot(shape[[20]], degrees=deg)
+        return shape
+
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    n = int(round(0.25 / s.dt))
+    for i in range(1, n + 1):
+        s.pos = s.pos + np.array([2.0 * s.palm / n, 0.0])
+        s._feed(None, s.pos, shape=swung(-60.0 * i / n))
+    s.hold(None, 0.3, shape=swung(-60.0))
+    assert s.kinds(GestureKind.SWIPE) == []
+    assert s.clf.swipe.last_reject == "tips incoherent"
+
+
+def test_swipe_then_relax_into_fist_still_counts(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 2.0, 0.0, 0.25)
+    s.hold("FIST", 0.5)                 # shape change inside the stroke tail
+    swipes = s.kinds(GestureKind.SWIPE)
+    assert [(e.direction, e.pose) for e in swipes] == [(Direction.RIGHT, Pose.OPEN_PALM)]
+
+
+def test_four_finger_swipe_types_like_open_palm(cfg):
+    s = Script(cfg)
+    s.hold("FOUR", 0.3)
+    s.move("FOUR", 2.0, 0.0, 0.25)      # thumb tucked during the sweep
+    s.hold("OPEN_PALM", 0.3)
+    swipes = s.kinds(GestureKind.SWIPE)
+    assert [(e.direction, e.pose) for e in swipes] == [(Direction.RIGHT, Pose.OPEN_PALM)]
+    assert KeyMapper(cfg.keyboard).map(swipes[0]) == "<space>"
+
+
+def test_sweep_out_of_frame_still_counts(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 1.6, 0.0, 0.2)
+    s.absent(0.5)                       # hand leaves the frame mid-stroke
+    swipes = s.kinds(GestureKind.SWIPE)
+    assert [(e.direction, e.pose) for e in swipes] == [(Direction.RIGHT, Pose.OPEN_PALM)]
+
+
+def test_every_stroke_is_reported_to_the_log_hook(cfg):
+    s = Script(cfg)
+    rows = []
+    s.clf.swipe.on_stroke = rows.append
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 2.0, 0.0, 0.25)     # typed
+    s.hold("OPEN_PALM", 0.1)
+    s.move("OPEN_PALM", -2.0, 0.0, 0.25)    # natural return -> suppressed
+    s.hold("OPEN_PALM", 0.6)
+    s.move("OPEN_PALM", 0.8, 0.0, 0.2)      # too short
+    s.hold("OPEN_PALM", 0.3)
+    assert [(r["outcome"], r["direction"]) for r in rows] == [
+        ("swipe", "RIGHT"), ("return_suppressed", "LEFT"), ("rejected", "RIGHT")]
+    assert rows[2]["reason"].startswith("distance")
+    assert rows[0]["pose"] == "OPEN_PALM" and "OPEN_PALM:" in rows[0]["pose_votes"]
+    assert rows[0]["distance"] > cfg.gesture.swipe_min_distance
+    assert s.clf.swipe.last_reject == rows[2]["reason"]
+
+
+def test_slow_drift_before_a_sweep_does_not_inflate_its_duration(cfg):
+    s = Script(cfg)
+    rows = []
+    s.clf.swipe.on_stroke = rows.append
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 1.5, 0.0, 1.0)      # 1.5 palm/s: above rest, below start
+    s.move("OPEN_PALM", 2.0, 0.0, 0.25)     # the actual sweep
+    s.hold("OPEN_PALM", 0.3)
+    assert [e.direction for e in s.kinds(GestureKind.SWIPE)] == [Direction.RIGHT]
+    # One stroke, not a timed-out stroke plus a leftover that happens to pass.
+    assert [r["outcome"] for r in rows] == ["swipe"] and rows[0]["duration"] < 0.7
+
+
+def test_slow_long_sweep_is_accepted(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 3.0, 0.0, 1.0)      # 3 palm/s for a full second
+    s.hold("OPEN_PALM", 0.3)
+    assert [e.direction for e in s.kinds(GestureKind.SWIPE)] == [Direction.RIGHT]
+
+
+def test_near_miss_reports_reason(cfg):
+    s = Script(cfg)
+    s.hold("OPEN_PALM", 0.3)
+    s.move("OPEN_PALM", 0.9, 0.0, 0.2)  # too short
+    s.hold("OPEN_PALM", 0.3)
+    assert s.kinds(GestureKind.SWIPE) == []
+    assert s.clf.swipe.last_reject.startswith("distance")
 
 
 # ------------------------------------------------------------- wake (hold) -- #

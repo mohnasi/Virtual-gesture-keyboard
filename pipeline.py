@@ -14,7 +14,7 @@ import time
 from typing import TYPE_CHECKING, Callable, Optional
 
 from camera import Frame, LatestFrameSlot
-from gestures import GestureClassifier, GestureKind
+from gestures import GestureClassifier, GestureKind, track_point
 from keyboard_output import KeyboardOutput, KeyMapper
 from motion_gate import MotionGate
 from state_machine import StateMachine
@@ -137,8 +137,9 @@ class InferenceWorker(threading.Thread):
         from hud import HudSnapshot
 
         clf = self._classifier
+        mode = clf.swipe.track_mode
         trail = tuple(
-            (float(r.obs.wrist_px[0]), float(r.obs.wrist_px[1]))
+            tuple(float(v) for v in track_point(r.obs, mode))
             for r in clf.buffer.since(frame.timestamp - self._hud.trail_s) if r.obs.present
         )
         self._hud.publish(HudSnapshot(
@@ -164,4 +165,6 @@ class InferenceWorker(threading.Thread):
             off_progress=clf.off_sequence.progress,
             on_progress=clf.on_sequence.progress,
             reps_needed=clf.off_sequence.reps,
+            swipe_reject=clf.swipe.last_reject,
+            swipe_reject_t=clf.swipe.last_reject_t,
         ))

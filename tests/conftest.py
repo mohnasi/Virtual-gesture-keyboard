@@ -81,13 +81,18 @@ HANDS = {
 
 
 def observation(pose: str | None, t: float, wrist=(320.0, 200.0), palm=80.0,
-                jitter: float = 0.0, rng=None, handedness: str = "Right") -> HandObservation:
+                jitter: float = 0.0, rng=None, handedness: str = "Right",
+                degrees: float = 0.0, shape: np.ndarray | None = None) -> HandObservation:
     """A HandObservation as the tracker would emit it.
 
-    ``jitter`` adds per-landmark noise in palm lengths (to mimic MediaPipe)."""
-    if pose is None:
+    ``jitter`` adds per-landmark noise in palm lengths (to mimic MediaPipe).
+    ``degrees`` turns the hand about the wrist (a wrist flick); ``shape``
+    overrides ``HANDS[pose]`` with explicit wrist-origin landmarks."""
+    if pose is None and shape is None:
         return HandObservation(t)
-    shape = HANDS[pose].copy()
+    shape = (HANDS[pose] if shape is None else shape).copy()
+    if degrees:
+        shape = _rot(shape, degrees=degrees)
     if jitter:
         shape = shape + (rng or np.random.default_rng()).normal(0, jitter, shape.shape)
     px = (shape * palm).astype(np.float32)

@@ -87,6 +87,8 @@ class HudSnapshot:
     off_progress: int = 0                     # thumb-down repetitions so far
     on_progress: int = 0                      # thumb-up repetitions so far
     reps_needed: int = 3
+    swipe_reject: Optional[str] = None         # why the last near-miss swipe failed
+    swipe_reject_t: float = float("-inf")
 
 
 class HudChannel:
@@ -347,6 +349,10 @@ class HudRenderer:
             if snap.last_key is not None and key_age <= self._cfg.event_display_s:
                 msg += f"  -> {key_label(snap.last_key)}"
             self._text(img, msg, (x, y2), _WHITE)
+            return
+        reject_age = snap.timestamp - snap.swipe_reject_t
+        if snap.swipe_reject and reject_age <= self._cfg.event_display_s:
+            self._text(img, f"Swipe missed: {snap.swipe_reject}", (x, y2), _GREY)
             return
 
         progress, hint = 0.0, ""

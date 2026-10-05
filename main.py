@@ -255,6 +255,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--asl-model", default=DEFAULT_CONFIG.asl.model_path,
                    help="trained ASL model bundle (default models/asl_rf.pkl)")
     p.add_argument("--log-level", default=DEFAULT_CONFIG.log_level)
+    p.add_argument("--swipe-log", nargs="?", const="logs/swipes.csv", default=None,
+                   metavar="CSV", help="append every swipe attempt (metrics + why it was "
+                   "accepted/rejected) to CSV for tuning (default logs/swipes.csv)")
     return p.parse_args(argv)
 
 
@@ -278,7 +281,22 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     cfg = build_config(args)
     setup_logging(cfg.log_level)
-    return GestureKeyboardApp(cfg, use_tray=not args.no_tray).run()
+    app = GestureKeyboardApp(cfg, use_tray=not args.no_tray)
+    if args.swipe_log is None:
+        return app.run()
+    from swipe_log import SwipeCsvLog
+
+    path = Path(args.swipe_log)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    swipes = SwipeCsvLog(path)
+    app.classifier.swipe.on_stroke = swipes
+    log.info("Logging swipe attempts to %s", path)
+    try:
+        return app.run()
+    finally:
+        swipes.close()
+        log.info("Swipe log: %d strokes written to %s", swipes.rows, path)
 
 
 if __name__ == "__main__":

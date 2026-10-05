@@ -68,6 +68,7 @@ DEEP STANDBY must *guarantee* no keystrokes. Three independent barriers enforce 
 | 19 | Dataset photos are unrelated to each other | Video-mode tracking reuses the previous hand's region, giving wrong landmarks | Extraction runs MediaPipe in static-image mode (`static_image_mode=True` / Tasks `IMAGE`) |
 | 20 | Dataset photos are 200×200, not 640×360 | Pixel-space conversion with the wrong size skews the features | `HandTracker.process` uses each image's real size. A parity test checks a 200×200 photo against a 640×360 frame |
 | 21 | Near-duplicate frames from a single signer | Random K-fold reports ~99% while a real webcam gets far less | `GroupKFold` by signer, and a loud warning when only one signer exists |
+| 22 | Wrist-only swipe tracking | A natural wrist flick barely moves the wrist, and a tucked thumb turned OPEN_PALM sweeps into unmapped FOUR sweeps | Swipes follow the fingertip centroid (rebuilt in pixels from wrist + palm scale). All four tips must agree, steps where tip-to-wrist distances change fast carry no motion (finger curls, letter changes), slow curls are rejected by a total shape-drift limit, and FOUR votes as OPEN_PALM. Rejected near-misses are shown on the HUD |
 
 ## 4. Static ASL letter classifier
 

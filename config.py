@@ -116,18 +116,35 @@ class PoseConfig:
 class GestureConfig:
     buffer_len: int = 45                   # ~1.5 s at 30 FPS
 
-    # --- swipe segmentation (wrist trajectory, palm lengths) ---------------- #
+    # --- swipe segmentation (tracked point, palm lengths) -------------------- #
+    # "fingertips" follows the mean of the 4 fingertips (catches wrist flicks,
+    # where the wrist itself barely moves); "wrist" is the original tracker.
+    swipe_track_point: str = "fingertips"  # "fingertips" | "wrist"
     swipe_start_speed: float = 2.2         # palm lengths / s to open a stroke
     swipe_end_speed: float = 1.0           # ... and to close it
-    swipe_min_distance: float = 1.1        # palm lengths travelled
+    swipe_min_distance: float = 1.0        # palm lengths travelled
     swipe_min_straightness: float = 0.75   # net / path length
     swipe_axis_dominance: float = 1.8      # major axis / minor axis
     swipe_min_duration_s: float = 0.06
-    swipe_max_duration_s: float = 0.90
+    swipe_max_duration_s: float = 1.20     # 0.90 cut off 37 of 164 real strokes
+    # A stroke is anchored at the last rest frame, but never further back than
+    # this: slow drift before a sweep otherwise inflates its duration.
+    swipe_anchor_lookback_s: float = 0.20
     speed_smoothing: float = 0.5           # EMA alpha on instantaneous speed
     refractory_s: float = 0.25             # dead time after an emitted swipe
-    return_suppress_s: float = 0.80        # ignore the opposite stroke this long
+    return_suppress_s: float = 0.60        # ignore the opposite stroke this long
     pose_vote_min_share: float = 0.55      # majority pose during a stroke
+    # Fingertip checks (only with swipe_track_point="fingertips"):
+    swipe_tip_coherence: float = 0.80      # cos(each tip's travel, mean travel)
+    swipe_tip_min_share: float = 0.50      # each tip travels >= this x mean
+    swipe_max_shape_change: float = 0.50   # tip-to-wrist distance drift over a
+                                           # stroke, palm lengths (slow curls)
+    swipe_max_shape_rate: float = 3.0      # palm lengths / s: faster tip-to-wrist
+                                           # change = fingers moving, not the hand
+    # Poses counted as another pose in the stroke vote. The thumb tucks or
+    # blurs mid-sweep, so FOUR frames count as OPEN_PALM.
+    swipe_pose_aliases: Dict[str, str] = field(
+        default_factory=lambda: {"FOUR": "OPEN_PALM"})
 
     # --- static hold (wake gesture) ------------------------------------------ #
     wake_hold_s: float = 2.0
@@ -187,6 +204,10 @@ class AslConfig:
     # between "Off, Off, Off" repetitions is not typed as A / S.
     cooldown_poses: Tuple[str, ...] = ("THUMB_DOWN",)
     cooldown_s: float = 1.5
+    # Letters pause while a swipe stroke is in flight and this long after it
+    # ends, so the hand settling after a sweep is not typed (a wrist flick
+    # barely moves the wrist, so the speed gate alone misses it).
+    after_swipe_s: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -210,7 +231,7 @@ class HudConfig:
     always_on_top: bool = True
     no_activate: bool = True               # Windows: never steal keyboard focus
                                            # (typed keys must reach YOUR app)
-    trail_s: float = 0.6                   # wrist trajectory drawn behind the hand
+    trail_s: float = 0.6                   # swipe-tracked point drawn behind the hand
     event_display_s: float = 2.0           # how long the last gesture stays visible
     dim_when_gated: bool = True            # darken the feed while ML is asleep
     refresh_ms_active: int = 10            # HighGUI event-pump interval (ACTIVE)

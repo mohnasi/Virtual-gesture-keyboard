@@ -205,3 +205,28 @@ def test_capture_rate_change_wakes_slow_loop(cfg, monkeypatch):
     w.shutdown()
     w.join(2.0)
     assert nxt is not None
+
+
+# --------------------------------------------------------------- swipe log -- #
+def test_swipe_csv_log_appends_rows_with_one_header(tmp_path):
+    import csv
+
+    from main import parse_args
+    from swipe_log import COLUMNS, SwipeCsvLog
+
+    path = tmp_path / "logs" / "swipes.csv"
+    row = {"outcome": "rejected", "reason": "distance 0.92<1.1", "distance": 0.9213,
+           "axis_ratio": float("inf"), "direction": "LEFT", "ignored_key": 1}
+    for _ in range(2):                      # two app runs append to one file
+        log = SwipeCsvLog(path)
+        log(row)
+        log.close()
+        log(row)                            # writes after close are dropped
+    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    assert len(rows) == 2 and tuple(rows[0]) == COLUMNS
+    assert rows[0]["distance"] == "0.921" and rows[0]["axis_ratio"] == "inf"
+    assert rows[0]["reason"] == "distance 0.92<1.1"
+
+    assert parse_args([]).swipe_log is None
+    assert parse_args(["--swipe-log"]).swipe_log == "logs/swipes.csv"
+    assert parse_args(["--swipe-log", "x.csv"]).swipe_log == "x.csv"

@@ -92,6 +92,17 @@ def test_recent_swipe_and_typed_key_render_without_error():
     assert img.shape == (270, 480, 3)
 
 
+def test_recent_swipe_reject_replaces_hint_then_expires():
+    r = HudRenderer(HUD, COLORS)
+    hint = r.render(_snap(letters_enabled=True))
+    fresh = r.render(_snap(letters_enabled=True, swipe_reject="tips incoherent",
+                           swipe_reject_t=9.5))
+    stale = r.render(_snap(letters_enabled=True, swipe_reject="tips incoherent",
+                           swipe_reject_t=10.0 - HUD.event_display_s - 1.0))
+    assert not np.array_equal(hint, fresh)
+    assert np.array_equal(hint, stale)
+
+
 # --------------------------------------------------------------- channel -- #
 def test_channel_returns_only_new_snapshots():
     ch = HudChannel(visible=True)

@@ -53,7 +53,7 @@ Entering or leaving DEEP STANDBY shows a native desktop notification. The tray m
 
 ## Live telemetry HUD
 
-<img src="docs/hud_preview.png" alt="HUD: holding a letter, a palm swipe for space, and the IDLE wake hold (synthetic test data)" width="100%"/>
+<img src="assets/hud_preview.png" alt="HUD: holding a letter, a palm swipe for space, and the IDLE wake hold (synthetic test data)" width="100%"/>
 
 <sub>Left to right: holding a letter (top-3 guesses and dwell bar), a palm swipe typing a space, and the wake hold in IDLE. Rendered by the HUD from the project's synthetic test hands.</sub>
 
@@ -61,7 +61,7 @@ A small window (480×270 by default) opens in the **top-right corner** of the sc
 
 | Where | What |
 |---|---|
-| Video | Live webcam feed with the **21-joint MediaPipe hand skeleton** drawn over your hand, plus the recent wrist trajectory (cyan trail). A large arrow flashes when a swipe is recognised |
+| Video | Live webcam feed with the **21-joint MediaPipe hand skeleton** drawn over your hand, plus the recent fingertip trajectory (cyan trail). A large arrow flashes when a swipe is recognised |
 | ASL panel (ACTIVE) | The classifier's **top-3 letter guesses with confidence %**. A tick on each bar marks the typing threshold, and a **dwell bar** fills over the 0.4 s hold. After a letter is typed the panel shows "relax to repeat" |
 | Top bar | **System state** (colour-coded like the tray), measured vs. target FPS, and MediaPipe inference time, or `ML skipped` when the motion gate is sleeping |
 | Bottom bar | **Current pose** (`POINT`, `OPEN_PALM`, …), the **last recognised gesture** with the key it typed (e.g. `LETTER H (88%) -> 'h'` or `SWIPE RIGHT (OPEN_PALM) -> SPACE`), the `TYPING OFF` / `NO ASL MODEL` badges, and progress bars for the wake hold and the ×3 sequences |
@@ -98,7 +98,7 @@ Letters come from a scikit-learn **Random Forest** trained on MediaPipe hand lan
 
 ### Editing: open-palm swipes
 
-Spread your hand open and make one smooth sweep of about 1–2 palm-lengths:
+Spread your hand open (thumb in or out) and make one smooth sweep of about 1–2 palm-lengths. A sweep of the whole arm and a quick flick from the wrist both work:
 
 | Open palm swipe | Key |
 |---|---|
@@ -106,7 +106,10 @@ Spread your hand open and make one smooth sweep of about 1–2 palm-lengths:
 | ← Left | ⌫ Backspace |
 | ↓ Down | ⏎ Enter |
 
+- Swipes follow your **four fingertips**, not your wrist, so a wrist flick counts. All four tips must move the same way and keep their shape, so curling into a fist (or changing letters) is never read as a swipe.
 - Swipe distances are measured in palm-lengths, so the same motion works at 40 cm or 1.5 m from the camera.
+- If a sweep doesn't register, the HUD's bottom bar briefly shows why (e.g. `Swipe missed: distance 0.92<1.1`). The thresholds are the `swipe_*` settings in `GestureConfig`. Set `swipe_track_point="wrist"` to go back to wrist tracking.
+- To tune swipes for your own motion, run `python main.py --swipe-log`. Every swipe attempt (typed or not) is appended to `logs/swipes.csv` with its distance, speed, straightness, fingertip agreement and the reason it was accepted or rejected.
 - Bringing your hand back after a swipe is recognised as a return stroke and is not typed.
 - The mapping is `EDIT_SWIPES` in [`config.py`](config.py).
 
@@ -124,7 +127,7 @@ python tools\train_asl.py data\features\user_samples.npz
 python main.py
 ```
 
-<img src="docs/record_samples_preview.png" alt="Recorder: countdown with J/Z note, capture progress, no-hand alert" width="100%"/>
+<img src="assets/record_samples_preview.png" alt="Recorder: countdown with J/Z note, capture progress, no-hand alert" width="100%"/>
 
 For each letter the recorder works like this:
 

@@ -158,6 +158,16 @@ def test_moving_hand_types_nothing(asl_model):
     assert Driver(asl_model).run("POINT", 1.5, speed=3.0).letters == []
 
 
+def test_letters_pause_around_a_swipe(asl_model):
+    # Hold a letter shape through a sweep: the hand settling afterwards must
+    # wait out after_swipe_s before the 0.4 s dwell can even start.
+    d = Driver(asl_model).run("POINT", 0.2).run("POINT", 0.4, speed=5.0)
+    d.run("POINT", 0.55)
+    assert d.letters == []
+    d.run("POINT", 0.6)
+    assert d.letters == ["D"]
+
+
 def test_control_poses_are_never_letters(asl_model):
     d = Driver(asl_model).run("OPEN_PALM", 1.0).run("THUMB_DOWN", 1.0)
     assert d.letters == [] and d.clf.letters.top == ()
