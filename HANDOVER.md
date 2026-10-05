@@ -22,6 +22,12 @@ past design decisions).
 - Windows 11, Python 3.13 (`python`), Git Bash and PowerShell both available.
 - Git remote `origin` = https://github.com/mohnasi/gesture-virtual-keyboard, branch `main`
   tracks `origin/main`. The GitHub CLI (`gh`) is **not** installed.
+- No git identity is configured on this machine. Commits use
+  `git -c user.name=mohnasi -c user.email=your.mohnasi.email@example.com commit ...` to match history.
+- History was rewritten on 2026-10-05 (old folder renamed to `assets/`, image metadata removed) and
+  force-pushed. A local branch `backup/before-history-rewrite` holds the old history; delete it
+  when no longer needed (`git branch -D backup/before-history-rewrite`).
+- README images live in `assets/`.
 - Dev deps (`requirements-dev.txt`: pytest, ruff, …) were installed into the
   global Python install on 2026-10-05.
 - Checks: `python -m pytest -q` (139 tests, hardware-free, synthetic hands in
@@ -49,7 +55,7 @@ and only typed a key if the stroke's majority pose was exactly `OPEN_PALM`. Like
 
 The user chose "B now, D later".
 
-### What was implemented (uncommitted at time of writing; check `git status`)
+### What was implemented
 - `gestures.py`
   - New helpers `fingertips_px(obs)`, `fingertip_reach(obs)` and `track_point(obs, mode)`.
     Fingertip pixels are rebuilt exactly as `wrist_px + landmarks[tips, :2] * palm_px`,
@@ -180,7 +186,7 @@ The user reported it "seems much smoother" and liked the letter pause. Session 2
    - no stray letters appear after swipes.
    Possible follow-ups: alias FIST or PINCH votes during fast strokes, IDLE drops
    (`no_hand_timeout_s`), and retraining the ASL model on more letters and signers.
-2. Commit and push the swipe work once you're happy with it (`git push`; the browser login may prompt).
+2. Swipe work is committed and pushed (`feat: fingertip-based swipe detection with tuning telemetry`).
 3. Option D, only if needed: extend `tools/record_samples.py` to record short swipe
    sequences (plus negatives: fingerspelling, curls, return strokes), train a sequence
    classifier following `tools/train_asl.py`, and save it under `models/`. Use the
