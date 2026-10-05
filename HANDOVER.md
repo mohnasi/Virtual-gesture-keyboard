@@ -22,11 +22,12 @@ past design decisions).
 - Windows 11, Python 3.13 (`python`), Git Bash and PowerShell both available.
 - Git remote `origin` = https://github.com/mohnasi/gesture-virtual-keyboard, branch `main`
   tracks `origin/main`. The GitHub CLI (`gh`) is **not** installed.
-- No git identity is configured on this machine. Commits use
-  `git -c user.name=mohnasi -c user.email=your.mohnasi.email@example.com commit ...` to match history.
-- History was rewritten on 2026-10-05 (old folder renamed to `assets/`, image metadata removed) and
-  force-pushed. A local branch `backup/before-history-rewrite` holds the old history; delete it
-  when no longer needed (`git branch -D backup/before-history-rewrite`).
+- Git identity is set globally to `mohnasi <nasimimohammed0@gmail.com>` (the GitHub account), and all
+  commits in history use it.
+- History was rewritten twice on 2026-10-05 and force-pushed: (1) old folder renamed to `assets/`
+  and image metadata removed; (2) commit author changed from a placeholder email to the account email.
+  Local branches `backup/before-history-rewrite` and `backup/before-author-rewrite` hold the old
+  history; delete them when no longer needed (`git branch -D <name>`).
 - README images live in `assets/`.
 - Dev deps (`requirements-dev.txt`: pytest, ruff, …) were installed into the
   global Python install on 2026-10-05.
